@@ -3,7 +3,7 @@ project(
   'rust',
   version: '0.1.0',
   license: 'GPL-3.0-or-later',
-  meson_version: '>= 0.63',
+  meson_version: '>= 1.4.0',
 )
 
 gnome = import('gnome')
@@ -11,6 +11,7 @@ gnome = import('gnome')
 app_id = 'it.dottorblaster.tegami'
 
 cargo = find_program('cargo', required: true)
+blueprint_compiler = find_program('blueprint-compiler', required: true)
 glib_compile_schemas = find_program('glib-compile-schemas', required: true)
 desktop_file_validate = find_program('desktop-file-validate', required: false)
 appstream_cli = find_program('appstreamcli', required: false)

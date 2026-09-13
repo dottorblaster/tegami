@@ -17,9 +17,21 @@ fn main() {
 
     let data_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../../data");
     let xml = data_dir.join("tegami.gresource.xml");
-    let bundle = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("tegami.gresource");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let bundle = out_dir.join("tegami.gresource");
+
+    let status = Command::new("blueprint-compiler")
+        .arg("batch-compile")
+        .arg(&out_dir)
+        .arg(&data_dir)
+        .arg(data_dir.join("ui").join("window.blp"))
+        .status()
+        .unwrap();
+    assert!(status.success());
 
     let status = Command::new("glib-compile-resources")
+        .arg("--sourcedir")
+        .arg(&out_dir)
         .arg("--sourcedir")
         .arg(&data_dir)
         .arg("--target")
@@ -30,6 +42,13 @@ fn main() {
     assert!(status.success());
 
     println!("cargo:rerun-if-changed={}", xml.display());
-    println!("cargo:rerun-if-changed={}", data_dir.join("resources").display());
-    println!("cargo:rustc-env=TEGAMI_RESOURCE_BUNDLE={}", bundle.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        data_dir.join("resources").display()
+    );
+    println!("cargo:rerun-if-changed={}", data_dir.join("ui").display());
+    println!(
+        "cargo:rustc-env=TEGAMI_RESOURCE_BUNDLE={}",
+        bundle.display()
+    );
 }

@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
   <id>@app-id@</id>
+  <metadata_license>FSFAP</metadata_license>
   <name>Tegami</name>
   <summary>Mail client for GNOME</summary>
   <developer id="it.dottorblaster">
     <name>Alessio Biancalana</name>
   </developer>
   <description>
-    <p>Tegami is a mail client for GNOME built with Rust and libadwaita.</p>
+    <p>Tegami is a mail client for GNOME built with Rust and libadwaita. It is designed around GObject-based account discovery and a UI-free core mail model.</p>
   </description>
   <launchable type="desktop-id">@app-id@.desktop</launchable>
   <provides>

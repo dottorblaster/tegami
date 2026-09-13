@@ -40,13 +40,26 @@ configure_file(
 
 test('validate-gschema', glib_compile_schemas, args: ['--strict', '--dry-run', meson.current_build_dir()])
 
+blueprints = custom_target(
+  'blueprints',
+  input: files('ui/window.blp'),
+  output: '.',
+  command: [
+    blueprint_compiler, 'batch-compile',
+    meson.current_build_dir(),
+    meson.current_source_dir(),
+    '@INPUT@',
+  ],
+)
+
 data_resources = gnome.compile_resources(
   'tegami-data',
   'tegami.gresource.xml',
-  source_dir: meson.current_source_dir(),
+  source_dir: [meson.current_build_dir(), meson.current_source_dir()],
   gresource_bundle: true,
   install: true,
   install_dir: pkgdatadir,
+  dependencies: blueprints,
 )
 
 subdir('icons')
