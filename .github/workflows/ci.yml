@@ -40,7 +40,7 @@ jobs:
           cd /
           dnf download --assumeyes libadwaita-devel
           rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
-          tar -xzf adw-gir.tgz ./usr/share/gir-1.0
+          tar -xf adw-gir.tgz ./usr/share/gir-1.0
           rm -f libadwaita-devel-*.rpm adw-gir.tgz
           test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
@@ -70,7 +70,7 @@ jobs:
           cd /
           dnf download --assumeyes libadwaita-devel
           rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
-          tar -xzf adw-gir.tgz ./usr/share/gir-1.0
+          tar -xf adw-gir.tgz ./usr/share/gir-1.0
           rm -f libadwaita-devel-*.rpm adw-gir.tgz
           test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
@@ -99,7 +99,7 @@ jobs:
           cd /
           dnf download --assumeyes libadwaita-devel
           rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
-          tar -xzf adw-gir.tgz ./usr/share/gir-1.0
+          tar -xf adw-gir.tgz ./usr/share/gir-1.0
           rm -f libadwaita-devel-*.rpm adw-gir.tgz
           test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
