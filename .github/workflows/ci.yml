@@ -25,14 +25,19 @@ jobs:
 
   rust:
     name: clippy + test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: registry.opensuse.org/opensuse/tumbleweed:latest
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev dbus python3-gi python3-gi-cairo
-          pip install --break-system-packages blueprint-compiler
+          zypper --gpg-auto-import-keys --non-interactive install \
+            gcc pkgconf-pkg-config glib2-devel glib2-tools gtk4-devel libadwaita-devel \
+            blueprint-compiler dbus-1-daemon git curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup component add clippy
       - uses: actions/cache@v6
         with:
           path: |
@@ -47,28 +52,44 @@ jobs:
 
   msrv:
     name: msrv (1.93)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: registry.opensuse.org/opensuse/tumbleweed:latest
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev python3-gi python3-gi-cairo
-          pip install --break-system-packages blueprint-compiler
-      - name: Install toolchain
-        run: rustup toolchain install 1.93 --profile minimal
+          zypper --gpg-auto-import-keys --non-interactive install \
+            gcc pkgconf-pkg-config glib2-devel glib2-tools gtk4-devel libadwaita-devel \
+            blueprint-compiler git curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.93 --profile minimal
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-msrv-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-msrv-${{ runner.os }}-
       - run: cargo +1.93 check --workspace --all-targets
 
   meson:
     name: meson
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    container:
+      image: registry.opensuse.org/opensuse/tumbleweed:latest
     steps:
       - uses: actions/checkout@v7
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev meson ninja-build appstream python3-gi python3-gi-cairo
-          pip install --break-system-packages blueprint-compiler
+          zypper --gpg-auto-import-keys --non-interactive install \
+            gcc pkgconf-pkg-config glib2-devel glib2-tools gtk4-devel libadwaita-devel \
+            blueprint-compiler meson ninja dbus-1-daemon git curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v6
         with:
           path: |
