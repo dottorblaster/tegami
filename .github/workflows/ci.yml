@@ -31,7 +31,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev python3-gi python3-gi-cairo
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev dbus python3-gi python3-gi-cairo
           pip install --break-system-packages blueprint-compiler
       - uses: actions/cache@v6
         with:
@@ -43,7 +43,7 @@ jobs:
           restore-keys: |
             cargo-rust-${{ runner.os }}-
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: dbus-run-session -- cargo test --workspace
 
   msrv:
     name: msrv (1.93)

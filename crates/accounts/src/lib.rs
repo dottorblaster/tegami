@@ -7,3 +7,5 @@
 //! accounts exposed by GOA's D-Bus API, maps them to an
 //! [`AccountConfig`] model and resolves passwords through the Secret
 //! Service. UI-free on purpose, so the logic can be tested headless.
+
+pub mod goa;
