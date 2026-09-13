@@ -35,7 +35,14 @@ jobs:
           toolchain: stable
           components: clippy
       - name: Install test dependencies
-        run: dnf install --assumeyes --quiet dbus-daemon
+        run: |
+          dnf install --assumeyes --quiet dbus-daemon
+          cd /
+          dnf download --assumeyes libadwaita-devel
+          rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
+          tar -xzf adw-gir.tgz ./usr/share/gir-1.0
+          rm -f libadwaita-devel-*.rpm adw-gir.tgz
+          test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
         with:
           path: |
@@ -58,6 +65,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.93"
+      - name: Install introspection data
+        run: |
+          cd /
+          dnf download --assumeyes libadwaita-devel
+          rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
+          tar -xzf adw-gir.tgz ./usr/share/gir-1.0
+          rm -f libadwaita-devel-*.rpm adw-gir.tgz
+          test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
         with:
           path: |
@@ -79,6 +94,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+      - name: Install introspection data
+        run: |
+          cd /
+          dnf download --assumeyes libadwaita-devel
+          rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
+          tar -xzf adw-gir.tgz ./usr/share/gir-1.0
+          rm -f libadwaita-devel-*.rpm adw-gir.tgz
+          test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
         with:
           path: |
