@@ -16,11 +16,13 @@ pub mod enumerate;
 pub mod mail;
 pub mod oauth2;
 pub mod object_manager;
+pub mod password_based;
 pub mod token;
 
 pub use account::AccountProxy;
-pub use enumerate::enumerate_mail_accounts;
+pub use enumerate::{MailAccount, enumerate_accounts, enumerate_mail_accounts};
 pub use mail::MailProxy;
 pub use oauth2::OAuth2BasedProxy;
 pub use object_manager::ObjectManagerProxy;
+pub use password_based::PasswordBasedProxy;
 pub use token::OAuth2TokenCache;

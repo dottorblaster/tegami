@@ -31,12 +31,12 @@ pub async fn enumerate_mail_accounts(connection: &Connection) -> zbus::Result<Ve
     let mut sources = Vec::new();
     for (path, interfaces) in objects {
         if interfaces.contains_key(SOURCE_INTERFACE)
-            && let Some(source) = source(connection, path).await
+            && let Some(source) = source_raw(connection, path).await
         {
             sources.push(source);
         }
     }
-    Ok(mail_accounts(&sources))
+    Ok(parse_sources(&sources))
 }
 
 pub fn mail_accounts(sources: &[Source]) -> Vec<AccountConfig> {
@@ -50,7 +50,20 @@ pub fn mail_accounts(sources: &[Source]) -> Vec<AccountConfig> {
     accounts
 }
 
-async fn source(connection: &Connection, path: OwnedObjectPath) -> Option<Source> {
+fn parse_sources(sources: &[(String, String)]) -> Vec<AccountConfig> {
+    let sources: Vec<Source> = sources
+        .iter()
+        .filter_map(|(uid, data)| {
+            Some(Source {
+                uid: uid.clone(),
+                data: SourceData::parse(data)?,
+            })
+        })
+        .collect();
+    mail_accounts(&sources)
+}
+
+async fn source_raw(connection: &Connection, path: OwnedObjectPath) -> Option<(String, String)> {
     let proxy = SourceProxy::builder(connection)
         .path(path.as_str())
         .ok()?
@@ -58,8 +71,8 @@ async fn source(connection: &Connection, path: OwnedObjectPath) -> Option<Source
         .await
         .ok()?;
     let uid = proxy.uid().await.ok()?;
-    let data = SourceData::parse(&proxy.data().await.ok()?)?;
-    Some(Source { uid, data })
+    let data = proxy.data().await.ok()?;
+    Some((uid, data))
 }
 
 fn is_imap_account(source: &Source) -> bool {

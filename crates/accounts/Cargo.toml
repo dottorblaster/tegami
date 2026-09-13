@@ -12,9 +12,11 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+futures-core = "0.3"
 glib = "0.22"
 mail-core = { path = "../mail-core" }
 oo7 = "0.6.0"
+tokio = { version = "1", features = ["sync"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]

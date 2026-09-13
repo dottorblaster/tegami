@@ -9,5 +9,12 @@
 //! through the Secret Service. UI-free on purpose, so the logic can be
 //! tested headless.
 
+pub mod credentials;
 pub mod eds;
 pub mod goa;
+pub mod manager;
+pub mod model;
+
+pub use credentials::{CredentialError, CredentialWorker, Credentials};
+pub use manager::AccountManager;
+pub use model::{Account, AccountChange, EdsReference, GoaReference};

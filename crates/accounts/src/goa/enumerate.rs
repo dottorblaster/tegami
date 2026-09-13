@@ -8,6 +8,7 @@
 //! to [`mail_core::account::AccountConfig`].
 
 use zbus::connection::Connection;
+use zbus::zvariant::OwnedObjectPath;
 
 use mail_core::account::{AccountConfig, ImapConfig, SmtpConfig};
 
@@ -15,32 +16,53 @@ use crate::goa::{AccountProxy, MailProxy, ObjectManagerProxy};
 
 const MAIL_INTERFACE: &str = "org.gnome.OnlineAccounts.Mail";
 const ACCOUNT_INTERFACE: &str = "org.gnome.OnlineAccounts.Account";
+const OAUTH2_INTERFACE: &str = "org.gnome.OnlineAccounts.OAuth2Based";
+
+#[derive(Clone, Debug)]
+pub struct MailAccount {
+    pub config: AccountConfig,
+    pub path: OwnedObjectPath,
+    pub oauth2: bool,
+}
 
 pub async fn enumerate_mail_accounts(connection: &Connection) -> zbus::Result<Vec<AccountConfig>> {
+    Ok(enumerate_accounts(connection)
+        .await?
+        .into_iter()
+        .map(|account| account.config)
+        .collect())
+}
+
+pub async fn enumerate_accounts(connection: &Connection) -> zbus::Result<Vec<MailAccount>> {
     let manager = ObjectManagerProxy::builder(connection).build().await?;
     let objects = manager.get_managed_objects().await?;
     let mut accounts = Vec::new();
     for (path, interfaces) in objects {
+        let oauth2 = interfaces.contains_key(OAUTH2_INTERFACE);
         if interfaces.contains_key(MAIL_INTERFACE)
             && interfaces.contains_key(ACCOUNT_INTERFACE)
-            && let Some(account) = mail_account(connection, path.as_str()).await
+            && let Some(account) = mail_account(connection, path, oauth2).await
         {
             accounts.push(account);
         }
     }
-    accounts.sort_by(|a, b| a.id.cmp(&b.id));
+    accounts.sort_by(|a, b| a.config.id.cmp(&b.config.id));
     Ok(accounts)
 }
 
-async fn mail_account(connection: &Connection, path: &str) -> Option<AccountConfig> {
+async fn mail_account(
+    connection: &Connection,
+    path: OwnedObjectPath,
+    oauth2: bool,
+) -> Option<MailAccount> {
     let mail = MailProxy::builder(connection)
-        .path(path)
+        .path(path.as_str())
         .ok()?
         .build()
         .await
         .ok()?;
     let account = AccountProxy::builder(connection)
-        .path(path)
+        .path(path.as_str())
         .ok()?
         .build()
         .await
@@ -78,13 +100,17 @@ async fn mail_account(connection: &Connection, path: &str) -> Option<AccountConf
         None
     };
 
-    Some(AccountConfig {
-        id,
-        name,
-        email_address,
-        provider_type: Some(provider_type),
-        is_temporary,
-        imap,
-        smtp,
+    Some(MailAccount {
+        config: AccountConfig {
+            id,
+            name,
+            email_address,
+            provider_type: Some(provider_type),
+            is_temporary,
+            imap,
+            smtp,
+        },
+        path,
+        oauth2,
     })
 }
