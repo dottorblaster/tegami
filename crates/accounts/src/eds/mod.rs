@@ -11,10 +11,12 @@
 //! interface with a `UID` and a `Data` property holding the serialized
 //! key-file contents of the source.
 
+pub mod discover;
 pub mod enumerate;
 pub mod parse;
 pub mod source;
 
+pub use discover::{default_sources_dir, discover_mail_accounts, mail_accounts_from_dir};
 pub use enumerate::enumerate_mail_accounts;
 pub use parse::SourceData;
 pub use source::{ObjectManagerProxy, SourceProxy};

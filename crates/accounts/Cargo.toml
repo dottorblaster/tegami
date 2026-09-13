@@ -17,4 +17,5 @@ mail-core = { path = "../mail-core" }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

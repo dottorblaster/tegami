@@ -40,12 +40,14 @@ pub async fn enumerate_mail_accounts(connection: &Connection) -> zbus::Result<Ve
 }
 
 pub fn mail_accounts(sources: &[Source]) -> Vec<AccountConfig> {
-    sources
+    let mut accounts: Vec<_> = sources
         .iter()
         .filter(|source| source.data.boolean("Data Source", "Enabled") != Some(false))
         .filter(|source| is_imap_account(source))
         .filter_map(|source| account_config(sources, source))
-        .collect()
+        .collect();
+    accounts.sort_by(|a, b| a.id.cmp(&b.id));
+    accounts
 }
 
 async fn source(connection: &Connection, path: OwnedObjectPath) -> Option<Source> {

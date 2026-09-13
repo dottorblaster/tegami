@@ -4,13 +4,17 @@
 use std::collections::HashMap;
 
 use accounts::eds::SourceData;
+use accounts::eds::discover::{discover_mail_accounts, mail_accounts_from_dir};
 use accounts::eds::enumerate::{Source, enumerate_mail_accounts, mail_accounts};
+use tempfile::TempDir;
 use zbus::connection::{Builder, Connection};
 use zbus::interface;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 const SERVICE: &str = "org.gnome.evolution.dataserver.Sources5";
 const MANAGER_PATH: &str = "/org/gnome/evolution/dataserver/SourceManager";
+
+type ManagedObjects = HashMap<OwnedObjectPath, HashMap<String, HashMap<String, OwnedValue>>>;
 
 static BUS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -201,6 +205,54 @@ fn source(uid: &str, data: &str) -> Source {
     }
 }
 
+fn write_sources(dir: &std::path::Path, fixtures: &[(&str, &str)]) {
+    for (uid, data) in fixtures {
+        std::fs::write(dir.join(format!("{uid}.source")), data).unwrap();
+    }
+}
+
+fn disk_fixtures() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("fastmail-imap", FASTMAIL_IMAP),
+        ("fastmail-identity", FASTMAIL_IDENTITY),
+        ("fastmail-smtp", FASTMAIL_SMTP),
+        ("gmail-imap", GMAIL_IMAP),
+        ("gmail-identity", GMAIL_IDENTITY),
+        ("gmail-smtp", GMAIL_SMTP),
+        ("personal-calendar", CALENDAR),
+        ("disabled-imap", DISABLED_IMAP),
+    ]
+}
+
+fn assert_fastmail(account: &mail_core::account::AccountConfig) {
+    assert_eq!(account.id, "fastmail-imap");
+    assert_eq!(account.name, "Alessio Biancalana");
+    assert_eq!(account.email_address, "alessio@dottorblaster.it");
+    let imap = account.imap.as_ref().unwrap();
+    assert_eq!(imap.host, "imap.fastmail.com");
+    assert_eq!(imap.user_name, "alessio@dottorblaster.it");
+    assert!(imap.use_ssl);
+    assert!(!imap.use_tls);
+    let smtp = account.smtp.as_ref().unwrap();
+    assert_eq!(smtp.host, "smtp.fastmail.com");
+    assert!(smtp.use_auth);
+    assert!(smtp.auth_plain);
+    assert!(!smtp.auth_xoauth2);
+    assert!(smtp.use_ssl);
+}
+
+fn assert_gmail(account: &mail_core::account::AccountConfig) {
+    assert_eq!(account.id, "gmail-imap");
+    assert_eq!(account.name, "Suse Gmail");
+    assert_eq!(account.email_address, "alessio.biancalana@suse.com");
+    assert!(account.imap.as_ref().unwrap().use_ssl);
+    let smtp = account.smtp.as_ref().unwrap();
+    assert_eq!(smtp.host, "smtp.gmail.com");
+    assert!(smtp.use_auth);
+    assert!(smtp.auth_xoauth2);
+    assert!(!smtp.auth_plain);
+}
+
 fn sources() -> Vec<Source> {
     vec![
         source("fastmail-imap", FASTMAIL_IMAP),
@@ -212,6 +264,24 @@ fn sources() -> Vec<Source> {
         source("personal-calendar", CALENDAR),
         source("disabled-imap", DISABLED_IMAP),
     ]
+}
+
+struct UnavailableObjectManager;
+
+#[interface(name = "org.freedesktop.DBus.ObjectManager")]
+impl UnavailableObjectManager {
+    fn get_managed_objects(&self) -> Result<ManagedObjects, zbus::fdo::Error> {
+        Err(zbus::fdo::Error::ServiceUnknown(SERVICE.to_string()))
+    }
+}
+
+struct BrokenObjectManager;
+
+#[interface(name = "org.freedesktop.DBus.ObjectManager")]
+impl BrokenObjectManager {
+    fn get_managed_objects(&self) -> Result<ManagedObjects, zbus::fdo::Error> {
+        Err(zbus::fdo::Error::Failed("broken".to_string()))
+    }
 }
 
 async fn session_connection() -> Option<Connection> {
@@ -342,4 +412,53 @@ fn maps_sources_to_accounts() {
     assert_eq!(accounts[0].id, "fastmail-imap");
     assert_eq!(accounts[1].id, "gmail-imap");
     assert!(accounts.iter().all(|account| account.id != "disabled-imap"));
+}
+
+#[test]
+fn mail_accounts_from_disk() {
+    let dir = TempDir::new().unwrap();
+    write_sources(dir.path(), &disk_fixtures());
+    std::fs::write(dir.path().join("README"), "not a source").unwrap();
+
+    let accounts = mail_accounts_from_dir(dir.path());
+
+    assert_eq!(accounts.len(), 2);
+    assert_fastmail(&accounts[0]);
+    assert_gmail(&accounts[1]);
+}
+
+#[tokio::test]
+async fn discover_falls_back_to_disk() {
+    let _guard = BUS_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    write_sources(dir.path(), &disk_fixtures());
+    let Some(conn) = session_connection().await else {
+        return;
+    };
+    conn.object_server()
+        .at(MANAGER_PATH, UnavailableObjectManager)
+        .await
+        .unwrap();
+
+    let accounts = discover_mail_accounts(&conn, dir.path()).await.unwrap();
+
+    assert_eq!(accounts.len(), 2);
+    assert_fastmail(&accounts[0]);
+    assert_gmail(&accounts[1]);
+}
+
+#[tokio::test]
+async fn discover_propagates_other_errors() {
+    let _guard = BUS_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    write_sources(dir.path(), &disk_fixtures());
+    let Some(conn) = session_connection().await else {
+        return;
+    };
+    conn.object_server()
+        .at(MANAGER_PATH, BrokenObjectManager)
+        .await
+        .unwrap();
+
+    assert!(discover_mail_accounts(&conn, dir.path()).await.is_err());
 }
