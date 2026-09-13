@@ -38,10 +38,12 @@ jobs:
         run: |
           dnf install --assumeyes --quiet dbus-daemon cpio
           cd /
-          dnf download --assumeyes libadwaita-devel
-          rpm2cpio libadwaita-devel-*.rpm | cpio -id './usr/share/gir-1.0/*'
-          rm -f libadwaita-devel-*.rpm
+          dnf download --assumeyes libadwaita libadwaita-devel
+          rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
+          rm -f libadwaita*.rpm
           test -f usr/share/gir-1.0/Adw-1.gir
+          test -f usr/lib64/girepository-1.0/Adw-1.typelib
       - uses: actions/cache@v6
         with:
           path: |
@@ -68,10 +70,12 @@ jobs:
         run: |
           dnf install --assumeyes --quiet cpio
           cd /
-          dnf download --assumeyes libadwaita-devel
-          rpm2cpio libadwaita-devel-*.rpm | cpio -id './usr/share/gir-1.0/*'
-          rm -f libadwaita-devel-*.rpm
+          dnf download --assumeyes libadwaita libadwaita-devel
+          rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
+          rm -f libadwaita*.rpm
           test -f usr/share/gir-1.0/Adw-1.gir
+          test -f usr/lib64/girepository-1.0/Adw-1.typelib
       - uses: actions/cache@v6
         with:
           path: |
@@ -97,10 +101,12 @@ jobs:
         run: |
           dnf install --assumeyes --quiet cpio
           cd /
-          dnf download --assumeyes libadwaita-devel
-          rpm2cpio libadwaita-devel-*.rpm | cpio -id './usr/share/gir-1.0/*'
-          rm -f libadwaita-devel-*.rpm
+          dnf download --assumeyes libadwaita libadwaita-devel
+          rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
+          rm -f libadwaita*.rpm
           test -f usr/share/gir-1.0/Adw-1.gir
+          test -f usr/lib64/girepository-1.0/Adw-1.typelib
       - uses: actions/cache@v6
         with:
           path: |
