@@ -7,3 +7,5 @@
 //! conversation/thread grouping, and the `MailBackend` trait that
 //! connects accounts to IMAP (and later JMAP). No GTK, no I/O
 //! specifics here, so it stays easy to unit test in isolation.
+
+pub mod account;

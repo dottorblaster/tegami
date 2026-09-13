@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+mail-core = { path = "../mail-core" }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]

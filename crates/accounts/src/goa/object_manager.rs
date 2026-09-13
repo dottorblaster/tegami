@@ -11,7 +11,7 @@ use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 #[zbus::proxy(
     interface = "org.freedesktop.DBus.ObjectManager",
     default_service = "org.gnome.OnlineAccounts",
-    default_path = "/org/gnome/OnlineAccounts/Manager"
+    default_path = "/org/gnome/OnlineAccounts"
 )]
 pub trait ObjectManager {
     fn get_managed_objects(

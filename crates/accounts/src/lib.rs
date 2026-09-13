@@ -5,7 +5,8 @@
 //!
 //! Built on top of GNOME Online Accounts (GOA): it enumerates the mail
 //! accounts exposed by GOA's D-Bus API, maps them to an
-//! [`AccountConfig`] model and resolves passwords through the Secret
-//! Service. UI-free on purpose, so the logic can be tested headless.
+//! [`mail_core::account::AccountConfig`] model and resolves passwords
+//! through the Secret Service. UI-free on purpose, so the logic can be
+//! tested headless.
 
 pub mod goa;

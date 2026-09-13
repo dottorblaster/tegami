@@ -9,11 +9,16 @@ use zbus::interface;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 const SERVICE: &str = "org.gnome.OnlineAccounts";
+const MANAGER_PATH: &str = "/org/gnome/OnlineAccounts";
 const ACCOUNT_PATH: &str = "/org/gnome/OnlineAccounts/Accounts/1";
 
 static BUS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct MockAccount {
+    provider_type: String,
+    id: String,
+    identity: String,
+    presentation_identity: String,
     is_temporary: bool,
 }
 
@@ -21,22 +26,22 @@ struct MockAccount {
 impl MockAccount {
     #[zbus(property)]
     fn provider_type(&self) -> String {
-        "imap_smtp".to_string()
+        self.provider_type.clone()
     }
 
     #[zbus(property)]
     fn id(&self) -> String {
-        "1".to_string()
+        self.id.clone()
     }
 
     #[zbus(property)]
     fn identity(&self) -> String {
-        "mock@example.org".to_string()
+        self.identity.clone()
     }
 
     #[zbus(property)]
     fn presentation_identity(&self) -> String {
-        "Mock User <mock@example.org>".to_string()
+        self.presentation_identity.clone()
     }
 
     #[zbus(property)]
@@ -61,23 +66,33 @@ impl MockAccount {
     }
 }
 
-struct MockMail;
+struct MockMail {
+    email_address: String,
+    name: String,
+    imap_supported: bool,
+    smtp_supported: bool,
+}
 
 #[interface(name = "org.gnome.OnlineAccounts.Mail")]
 impl MockMail {
     #[zbus(property)]
     fn email_address(&self) -> String {
-        "mock@example.org".to_string()
+        self.email_address.clone()
     }
 
     #[zbus(property)]
     fn name(&self) -> String {
-        "Mock User".to_string()
+        self.name.clone()
     }
 
     #[zbus(property)]
     fn imap_supported(&self) -> bool {
-        true
+        self.imap_supported
+    }
+
+    #[zbus(property)]
+    fn imap_accept_ssl_errors(&self) -> bool {
+        false
     }
 
     #[zbus(property)]
@@ -91,8 +106,23 @@ impl MockMail {
     }
 
     #[zbus(property)]
+    fn imap_use_tls(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
     fn imap_user_name(&self) -> String {
-        "mock@example.org".to_string()
+        self.email_address.clone()
+    }
+
+    #[zbus(property)]
+    fn smtp_supported(&self) -> bool {
+        self.smtp_supported
+    }
+
+    #[zbus(property)]
+    fn smtp_accept_ssl_errors(&self) -> bool {
+        false
     }
 
     #[zbus(property)]
@@ -101,8 +131,38 @@ impl MockMail {
     }
 
     #[zbus(property)]
+    fn smtp_use_auth(&self) -> bool {
+        true
+    }
+
+    #[zbus(property)]
+    fn smtp_auth_login(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    fn smtp_auth_plain(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
+    fn smtp_auth_xoauth2(&self) -> bool {
+        true
+    }
+
+    #[zbus(property)]
+    fn smtp_use_ssl(&self) -> bool {
+        true
+    }
+
+    #[zbus(property)]
+    fn smtp_use_tls(&self) -> bool {
+        false
+    }
+
+    #[zbus(property)]
     fn smtp_user_name(&self) -> String {
-        "mock@example.org".to_string()
+        self.email_address.clone()
     }
 }
 
@@ -137,13 +197,27 @@ impl MockObjectManager {
             "org.gnome.OnlineAccounts.Account".to_string(),
             HashMap::new(),
         );
-        let mut mail = HashMap::new();
-        mail.insert("org.gnome.OnlineAccounts.Mail".to_string(), HashMap::new());
+        let mut account_with_mail = account.clone();
+        account_with_mail.insert("org.gnome.OnlineAccounts.Mail".to_string(), HashMap::new());
+        account_with_mail.insert(
+            "org.gnome.OnlineAccounts.OAuth2Based".to_string(),
+            HashMap::new(),
+        );
+        let mut account_imap_less = account.clone();
+        account_imap_less.insert("org.gnome.OnlineAccounts.Mail".to_string(), HashMap::new());
+
         let mut objects = HashMap::new();
-        objects.insert(OwnedObjectPath::try_from(ACCOUNT_PATH).unwrap(), account);
         objects.insert(
-            OwnedObjectPath::try_from(format!("{ACCOUNT_PATH}/mail")).unwrap(),
-            mail,
+            OwnedObjectPath::try_from(ACCOUNT_PATH).unwrap(),
+            account_with_mail,
+        );
+        objects.insert(
+            OwnedObjectPath::try_from("/org/gnome/OnlineAccounts/Accounts/2").unwrap(),
+            account,
+        );
+        objects.insert(
+            OwnedObjectPath::try_from("/org/gnome/OnlineAccounts/Accounts/3").unwrap(),
+            account_imap_less,
         );
         objects
     }
@@ -160,27 +234,56 @@ async fn session_connection() -> Option<Connection> {
     builder.name(SERVICE).ok()?.build().await.ok()
 }
 
+fn account(id: &str, provider_type: &str, identity: &str) -> MockAccount {
+    MockAccount {
+        provider_type: provider_type.to_string(),
+        id: id.to_string(),
+        identity: identity.to_string(),
+        presentation_identity: format!("User <{identity}>"),
+        is_temporary: false,
+    }
+}
+
+fn mail(email_address: &str, imap_supported: bool) -> MockMail {
+    MockMail {
+        email_address: email_address.to_string(),
+        name: email_address.to_string(),
+        imap_supported,
+        smtp_supported: true,
+    }
+}
+
 async fn serve(conn: &Connection) -> Option<()> {
     let server = conn.object_server();
+    server.at(MANAGER_PATH, MockObjectManager).await.ok()?;
     server
-        .at("/org/gnome/OnlineAccounts/Manager", MockObjectManager)
+        .at(ACCOUNT_PATH, account("1", "imap_smtp", "mock@example.org"))
         .await
         .ok()?;
     server
+        .at(ACCOUNT_PATH, mail("mock@example.org", true))
+        .await
+        .ok()?;
+    server.at(ACCOUNT_PATH, MockOAuth2).await.ok()?;
+    server
         .at(
-            ACCOUNT_PATH,
-            MockAccount {
-                is_temporary: false,
-            },
+            "/org/gnome/OnlineAccounts/Accounts/2",
+            account("2", "exchange", "other@example.org"),
         )
         .await
         .ok()?;
     server
-        .at(format!("{ACCOUNT_PATH}/mail"), MockMail)
+        .at(
+            "/org/gnome/OnlineAccounts/Accounts/3",
+            account("3", "google", "gmail@example.org"),
+        )
         .await
         .ok()?;
     server
-        .at(format!("{ACCOUNT_PATH}/oauth2"), MockOAuth2)
+        .at(
+            "/org/gnome/OnlineAccounts/Accounts/3",
+            mail("gmail@example.org", false),
+        )
         .await
         .ok()?;
     Some(())
@@ -216,7 +319,7 @@ async fn account_interface() {
     assert_eq!(account.identity().await.unwrap(), "mock@example.org");
     assert_eq!(
         account.presentation_identity().await.unwrap(),
-        "Mock User <mock@example.org>"
+        "User <mock@example.org>"
     );
     assert!(!account.is_temporary().await.unwrap());
     account.set_is_temporary(true).await.unwrap();
@@ -231,14 +334,14 @@ async fn mail_interface() {
     };
 
     let mail = MailProxy::builder(&conn)
-        .path(format!("{ACCOUNT_PATH}/mail"))
+        .path(ACCOUNT_PATH)
         .unwrap()
         .build()
         .await
         .unwrap();
 
     assert_eq!(mail.email_address().await.unwrap(), "mock@example.org");
-    assert_eq!(mail.name().await.unwrap(), "Mock User");
+    assert_eq!(mail.name().await.unwrap(), "mock@example.org");
     assert!(mail.imap_supported().await.unwrap());
     assert_eq!(mail.imap_host().await.unwrap(), "imap.example.org");
     assert!(mail.imap_use_ssl().await.unwrap());
@@ -253,7 +356,7 @@ async fn oauth2_interface() {
     };
 
     let oauth2 = OAuth2BasedProxy::builder(&conn)
-        .path(format!("{ACCOUNT_PATH}/oauth2"))
+        .path(ACCOUNT_PATH)
         .unwrap()
         .build()
         .await
@@ -278,6 +381,48 @@ async fn object_manager() {
     let objects = manager.get_managed_objects().await.unwrap();
     assert!(objects.contains_key(&OwnedObjectPath::try_from(ACCOUNT_PATH).unwrap()));
     assert!(
-        objects.contains_key(&OwnedObjectPath::try_from(format!("{ACCOUNT_PATH}/mail")).unwrap())
+        objects.contains_key(
+            &OwnedObjectPath::try_from("/org/gnome/OnlineAccounts/Accounts/2").unwrap()
+        )
     );
+}
+
+#[tokio::test]
+async fn enumerate_mail_accounts() {
+    let Some((conn, _guard)) = busy_setup().await else {
+        return;
+    };
+
+    let accounts = accounts::goa::enumerate_mail_accounts(&conn).await.unwrap();
+
+    assert_eq!(accounts.len(), 2);
+
+    let first = &accounts[0];
+    assert_eq!(first.id, "1");
+    assert_eq!(first.name, "mock@example.org");
+    assert_eq!(first.email_address, "mock@example.org");
+    assert_eq!(first.provider_type.as_deref(), Some("imap_smtp"));
+    assert!(!first.is_temporary);
+    let imap = first.imap.as_ref().unwrap();
+    assert_eq!(imap.host, "imap.example.org");
+    assert_eq!(imap.user_name, "mock@example.org");
+    assert!(imap.use_ssl);
+    assert!(!imap.use_tls);
+    assert!(!imap.accept_ssl_errors);
+    let smtp = first.smtp.as_ref().unwrap();
+    assert_eq!(smtp.host, "smtp.example.org");
+    assert_eq!(smtp.user_name, "mock@example.org");
+    assert!(smtp.use_auth);
+    assert!(smtp.auth_xoauth2);
+    assert!(!smtp.auth_plain);
+    assert!(smtp.use_ssl);
+    assert!(!smtp.use_tls);
+
+    let second = &accounts[1];
+    assert_eq!(second.id, "3");
+    assert_eq!(second.name, "gmail@example.org");
+    assert_eq!(second.email_address, "gmail@example.org");
+    assert_eq!(second.provider_type.as_deref(), Some("google"));
+    assert!(second.imap.is_none());
+    assert!(second.smtp.is_some());
 }
