@@ -27,22 +27,28 @@ jobs:
     name: clippy + test
     runs-on: ubuntu-latest
     container:
-      image: registry.opensuse.org/opensuse/tumbleweed:latest
+      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install dependencies
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Install test dependencies
         run: |
-          zypper --gpg-auto-import-keys --non-interactive install \
-            gcc pkgconf-pkg-config glib2-devel glib2-tools gtk4-devel libadwaita-devel \
-            blueprint-compiler dbus-1-daemon git curl
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup component add clippy
+          dnf install --assumeyes --quiet dbus-daemon cpio
+          cd /
+          dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
+          rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
+          rm -f libadwaita*.rpm
+          test -f usr/share/gir-1.0/Adw-1.gir
+          test -f usr/lib64/girepository-1.0/Adw-1.typelib
       - uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
           key: cargo-rust-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
@@ -54,22 +60,27 @@ jobs:
     name: msrv (1.93)
     runs-on: ubuntu-latest
     container:
-      image: registry.opensuse.org/opensuse/tumbleweed:latest
+      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install dependencies
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+      - name: Install introspection data
         run: |
-          zypper --gpg-auto-import-keys --non-interactive install \
-            gcc pkgconf-pkg-config glib2-devel glib2-tools gtk4-devel libadwaita-devel \
-            blueprint-compiler git curl
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          rustup toolchain install 1.93 --profile minimal
+          dnf install --assumeyes --quiet cpio
+          cd /
+          dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
+          rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
+          rm -f libadwaita*.rpm
+          test -f usr/share/gir-1.0/Adw-1.gir
+          test -f usr/lib64/girepository-1.0/Adw-1.typelib
       - uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
           key: cargo-msrv-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
@@ -80,21 +91,27 @@ jobs:
     name: meson
     runs-on: ubuntu-latest
     container:
-      image: registry.opensuse.org/opensuse/tumbleweed:latest
+      image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install dependencies
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - name: Install introspection data
         run: |
-          zypper --gpg-auto-import-keys --non-interactive install \
-            gcc pkgconf-pkg-config glib2-devel glib2-tools gtk4-devel libadwaita-devel \
-            blueprint-compiler meson ninja dbus-1-daemon git curl
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          dnf install --assumeyes --quiet cpio
+          cd /
+          dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
+          rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
+          rm -f libadwaita*.rpm
+          test -f usr/share/gir-1.0/Adw-1.gir
+          test -f usr/lib64/girepository-1.0/Adw-1.typelib
       - uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
             target
           key: cargo-meson-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
