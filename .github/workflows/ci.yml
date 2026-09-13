@@ -36,12 +36,11 @@ jobs:
           components: clippy
       - name: Install test dependencies
         run: |
-          dnf install --assumeyes --quiet dbus-daemon
+          dnf install --assumeyes --quiet dbus-daemon cpio
           cd /
           dnf download --assumeyes libadwaita-devel
-          rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
-          tar -xf adw-gir.tgz ./usr/share/gir-1.0
-          rm -f libadwaita-devel-*.rpm adw-gir.tgz
+          rpm2cpio libadwaita-devel-*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rm -f libadwaita-devel-*.rpm
           test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
         with:
@@ -67,11 +66,11 @@ jobs:
           toolchain: "1.93"
       - name: Install introspection data
         run: |
+          dnf install --assumeyes --quiet cpio
           cd /
           dnf download --assumeyes libadwaita-devel
-          rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
-          tar -xf adw-gir.tgz ./usr/share/gir-1.0
-          rm -f libadwaita-devel-*.rpm adw-gir.tgz
+          rpm2cpio libadwaita-devel-*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rm -f libadwaita-devel-*.rpm
           test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
         with:
@@ -96,11 +95,11 @@ jobs:
           toolchain: stable
       - name: Install introspection data
         run: |
+          dnf install --assumeyes --quiet cpio
           cd /
           dnf download --assumeyes libadwaita-devel
-          rpm2archive libadwaita-devel-*.rpm > adw-gir.tgz
-          tar -xf adw-gir.tgz ./usr/share/gir-1.0
-          rm -f libadwaita-devel-*.rpm adw-gir.tgz
+          rpm2cpio libadwaita-devel-*.rpm | cpio -id './usr/share/gir-1.0/*'
+          rm -f libadwaita-devel-*.rpm
           test -f usr/share/gir-1.0/Adw-1.gir
       - uses: actions/cache@v6
         with:
