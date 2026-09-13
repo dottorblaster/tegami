@@ -1,0 +1,27 @@
+[Data Source]
+DisplayName=user@fastmail.example.org
+Enabled=true
+Parent=8c0a229b1ed98a15a2b85b77e332396f082e57ef
+
+[Authentication]
+Host=smtp.fastmail.example.org
+Method=PLAIN
+Port=465
+ProxyUid=system-proxy
+RememberPassword=true
+User=user@fastmail.example.org
+CredentialName=
+IsExternal=false
+
+[Security]
+Method=ssl-on-alternate-port
+
+[Mail Transport]
+BackendName=smtp
+
+[Smtp Backend]
+ReencodeData=false
+DsnRetFull=false
+DsnNotifySuccess=true
+DsnNotifyFailure=true
+DsnNotifyDelay=true

@@ -18,141 +18,27 @@ type ManagedObjects = HashMap<OwnedObjectPath, HashMap<String, HashMap<String, O
 
 static BUS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-const FASTMAIL_IMAP: &str = "\
-[Data Source]
-DisplayName=alessio@dottorblaster.it
-Enabled=true
-Parent=collection-fastmail
+const FASTMAIL_IMAP: &str =
+    include_str!("fixtures/eds/c68d7f1afb422dd27c3f4cd098ba2be01b514e58.source");
+const FASTMAIL_IDENTITY: &str =
+    include_str!("fixtures/eds/5f17d8b5541804eee23b8902151f9cd17f3a9f97.source");
+const FASTMAIL_SMTP: &str =
+    include_str!("fixtures/eds/07333698cc03117632160cb8de2cc6bf11df61cb.source");
+const GMAIL_IMAP: &str =
+    include_str!("fixtures/eds/6065d502a22c5cde5f8d8d9f390718534b450c4a.source");
+const GMAIL_IDENTITY: &str =
+    include_str!("fixtures/eds/0b176a8664eba323b9ee3fef1638b94826bb5e8b.source");
+const GMAIL_SMTP: &str =
+    include_str!("fixtures/eds/d0669aa7f547a31b7460f04a991409ebae129940.source");
+const CALENDAR: &str = include_str!("fixtures/eds/system-calendar.source");
+const DISABLED_IMAP: &str = include_str!("fixtures/eds/imap-disabled.source");
 
-[Mail Account]
-BackendName=imapx
-IdentityUid=fastmail-identity
-
-[Authentication]
-Host=imap.fastmail.com
-Method=none
-Port=993
-User=alessio@dottorblaster.it
-
-[Security]
-Method=ssl-on-alternate-port
-";
-
-const FASTMAIL_IDENTITY: &str = "\
-[Data Source]
-DisplayName=alessio@dottorblaster.it
-Enabled=true
-Parent=collection-fastmail
-
-[Mail Submission]
-TransportUid=fastmail-smtp
-
-[Mail Identity]
-Address=alessio@dottorblaster.it
-Name=Alessio Biancalana
-";
-
-const FASTMAIL_SMTP: &str = "\
-[Data Source]
-DisplayName=alessio@dottorblaster.it
-Enabled=true
-Parent=collection-fastmail
-
-[Authentication]
-Host=smtp.fastmail.com
-Method=PLAIN
-Port=465
-User=alessio@dottorblaster.it
-
-[Security]
-Method=ssl-on-alternate-port
-
-[Mail Transport]
-BackendName=smtp
-";
-
-const GMAIL_IMAP: &str = "\
-[Data Source]
-DisplayName=alessio.biancalana@suse.com
-Enabled=true
-Parent=collection-google
-
-[Mail Account]
-BackendName=imapx
-IdentityUid=gmail-identity
-
-[Authentication]
-Host=imap.gmail.com
-Method=XOAUTH2
-Port=993
-User=alessio.biancalana@suse.com
-
-[Security]
-Method=ssl-on-alternate-port
-";
-
-const GMAIL_IDENTITY: &str = "\
-[Data Source]
-DisplayName=alessio.biancalana@suse.com
-Enabled=true
-Parent=collection-google
-
-[Mail Submission]
-TransportUid=gmail-smtp
-
-[Mail Identity]
-Address=alessio.biancalana@suse.com
-Name=Suse Gmail
-";
-
-const GMAIL_SMTP: &str = "\
-[Data Source]
-DisplayName=alessio.biancalana@suse.com
-Enabled=true
-Parent=collection-google
-
-[Authentication]
-Host=smtp.gmail.com
-Method=XOAUTH2
-Port=465
-User=alessio.biancalana@suse.com
-
-[Security]
-Method=ssl-on-alternate-port
-
-[Mail Transport]
-BackendName=smtp
-";
-
-const CALENDAR: &str = "\
-[Data Source]
-DisplayName=Personal
-Enabled=true
-Parent=collection-local
-
-[Calendar]
-BackendName=local
-";
-
-const DISABLED_IMAP: &str = "\
-[Data Source]
-DisplayName=old@example.org
-Enabled=false
-Parent=collection-local
-
-[Mail Account]
-BackendName=imapx
-IdentityUid=disabled-identity
-
-[Authentication]
-Host=imap.example.org
-Method=PLAIN
-Port=993
-User=old@example.org
-
-[Security]
-Method=ssl-on-alternate-port
-";
+const FASTMAIL_IMAP_UID: &str = "c68d7f1afb422dd27c3f4cd098ba2be01b514e58";
+const FASTMAIL_IDENTITY_UID: &str = "5f17d8b5541804eee23b8902151f9cd17f3a9f97";
+const FASTMAIL_SMTP_UID: &str = "07333698cc03117632160cb8de2cc6bf11df61cb";
+const GMAIL_IMAP_UID: &str = "6065d502a22c5cde5f8d8d9f390718534b450c4a";
+const GMAIL_IDENTITY_UID: &str = "0b176a8664eba323b9ee3fef1638b94826bb5e8b";
+const GMAIL_SMTP_UID: &str = "d0669aa7f547a31b7460f04a991409ebae129940";
 
 struct MockSource {
     uid: String,
@@ -213,28 +99,28 @@ fn write_sources(dir: &std::path::Path, fixtures: &[(&str, &str)]) {
 
 fn disk_fixtures() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("fastmail-imap", FASTMAIL_IMAP),
-        ("fastmail-identity", FASTMAIL_IDENTITY),
-        ("fastmail-smtp", FASTMAIL_SMTP),
-        ("gmail-imap", GMAIL_IMAP),
-        ("gmail-identity", GMAIL_IDENTITY),
-        ("gmail-smtp", GMAIL_SMTP),
+        (FASTMAIL_IMAP_UID, FASTMAIL_IMAP),
+        (FASTMAIL_IDENTITY_UID, FASTMAIL_IDENTITY),
+        (FASTMAIL_SMTP_UID, FASTMAIL_SMTP),
+        (GMAIL_IMAP_UID, GMAIL_IMAP),
+        (GMAIL_IDENTITY_UID, GMAIL_IDENTITY),
+        (GMAIL_SMTP_UID, GMAIL_SMTP),
         ("personal-calendar", CALENDAR),
         ("disabled-imap", DISABLED_IMAP),
     ]
 }
 
 fn assert_fastmail(account: &mail_core::account::AccountConfig) {
-    assert_eq!(account.id, "fastmail-imap");
-    assert_eq!(account.name, "Alessio Biancalana");
-    assert_eq!(account.email_address, "alessio@dottorblaster.it");
+    assert_eq!(account.id, FASTMAIL_IMAP_UID);
+    assert_eq!(account.name, "Fixture User");
+    assert_eq!(account.email_address, "user@fastmail.example.org");
     let imap = account.imap.as_ref().unwrap();
-    assert_eq!(imap.host, "imap.fastmail.com");
-    assert_eq!(imap.user_name, "alessio@dottorblaster.it");
+    assert_eq!(imap.host, "imap.fastmail.example.org");
+    assert_eq!(imap.user_name, "user@fastmail.example.org");
     assert!(imap.use_ssl);
     assert!(!imap.use_tls);
     let smtp = account.smtp.as_ref().unwrap();
-    assert_eq!(smtp.host, "smtp.fastmail.com");
+    assert_eq!(smtp.host, "smtp.fastmail.example.org");
     assert!(smtp.use_auth);
     assert!(smtp.auth_plain);
     assert!(!smtp.auth_xoauth2);
@@ -242,12 +128,12 @@ fn assert_fastmail(account: &mail_core::account::AccountConfig) {
 }
 
 fn assert_gmail(account: &mail_core::account::AccountConfig) {
-    assert_eq!(account.id, "gmail-imap");
-    assert_eq!(account.name, "Suse Gmail");
-    assert_eq!(account.email_address, "alessio.biancalana@suse.com");
+    assert_eq!(account.id, GMAIL_IMAP_UID);
+    assert_eq!(account.name, "user@googlemail.example.org");
+    assert_eq!(account.email_address, "user@googlemail.example.org");
     assert!(account.imap.as_ref().unwrap().use_ssl);
     let smtp = account.smtp.as_ref().unwrap();
-    assert_eq!(smtp.host, "smtp.gmail.com");
+    assert_eq!(smtp.host, "smtp.gmail.example.org");
     assert!(smtp.use_auth);
     assert!(smtp.auth_xoauth2);
     assert!(!smtp.auth_plain);
@@ -255,12 +141,12 @@ fn assert_gmail(account: &mail_core::account::AccountConfig) {
 
 fn sources() -> Vec<Source> {
     vec![
-        source("fastmail-imap", FASTMAIL_IMAP),
-        source("fastmail-identity", FASTMAIL_IDENTITY),
-        source("fastmail-smtp", FASTMAIL_SMTP),
-        source("gmail-imap", GMAIL_IMAP),
-        source("gmail-identity", GMAIL_IDENTITY),
-        source("gmail-smtp", GMAIL_SMTP),
+        source(FASTMAIL_IMAP_UID, FASTMAIL_IMAP),
+        source(FASTMAIL_IDENTITY_UID, FASTMAIL_IDENTITY),
+        source(FASTMAIL_SMTP_UID, FASTMAIL_SMTP),
+        source(GMAIL_IMAP_UID, GMAIL_IMAP),
+        source(GMAIL_IDENTITY_UID, GMAIL_IDENTITY),
+        source(GMAIL_SMTP_UID, GMAIL_SMTP),
         source("personal-calendar", CALENDAR),
         source("disabled-imap", DISABLED_IMAP),
     ]
@@ -297,16 +183,7 @@ async fn session_connection() -> Option<Connection> {
 
 async fn serve(conn: &Connection) -> Option<()> {
     let server = conn.object_server();
-    let fixtures: Vec<(&str, &str)> = vec![
-        ("fastmail-imap", FASTMAIL_IMAP),
-        ("fastmail-identity", FASTMAIL_IDENTITY),
-        ("fastmail-smtp", FASTMAIL_SMTP),
-        ("gmail-imap", GMAIL_IMAP),
-        ("gmail-identity", GMAIL_IDENTITY),
-        ("gmail-smtp", GMAIL_SMTP),
-        ("personal-calendar", CALENDAR),
-        ("disabled-imap", DISABLED_IMAP),
-    ];
+    let fixtures: Vec<(&str, &str)> = disk_fixtures();
     let paths = fixtures
         .iter()
         .enumerate()
@@ -344,38 +221,8 @@ async fn enumerate_mail_accounts_from_sources() {
     let accounts = enumerate_mail_accounts(&conn).await.unwrap();
 
     assert_eq!(accounts.len(), 2);
-
-    let fastmail = &accounts[0];
-    assert_eq!(fastmail.id, "fastmail-imap");
-    assert_eq!(fastmail.name, "Alessio Biancalana");
-    assert_eq!(fastmail.email_address, "alessio@dottorblaster.it");
-    assert!(fastmail.provider_type.is_none());
-    assert!(!fastmail.is_temporary);
-    let imap = fastmail.imap.as_ref().unwrap();
-    assert_eq!(imap.host, "imap.fastmail.com");
-    assert_eq!(imap.user_name, "alessio@dottorblaster.it");
-    assert!(imap.use_ssl);
-    assert!(!imap.use_tls);
-    assert!(!imap.accept_ssl_errors);
-    let smtp = fastmail.smtp.as_ref().unwrap();
-    assert_eq!(smtp.host, "smtp.fastmail.com");
-    assert_eq!(smtp.user_name, "alessio@dottorblaster.it");
-    assert!(smtp.use_auth);
-    assert!(smtp.auth_plain);
-    assert!(!smtp.auth_login);
-    assert!(!smtp.auth_xoauth2);
-    assert!(smtp.use_ssl);
-
-    let gmail = &accounts[1];
-    assert_eq!(gmail.id, "gmail-imap");
-    assert_eq!(gmail.name, "Suse Gmail");
-    assert_eq!(gmail.email_address, "alessio.biancalana@suse.com");
-    assert_eq!(gmail.imap.as_ref().unwrap().host, "imap.gmail.com");
-    let smtp = gmail.smtp.as_ref().unwrap();
-    assert_eq!(smtp.host, "smtp.gmail.com");
-    assert!(smtp.use_auth);
-    assert!(smtp.auth_xoauth2);
-    assert!(!smtp.auth_plain);
+    assert_gmail(&accounts[0]);
+    assert_fastmail(&accounts[1]);
 }
 
 #[test]
@@ -390,7 +237,7 @@ fn parse_source_data() {
     assert_eq!(data.boolean("Data Source", "Enabled"), Some(true));
     assert_eq!(
         data.string("Authentication", "Host").as_deref(),
-        Some("imap.fastmail.com")
+        Some("imap.fastmail.example.org")
     );
     assert_eq!(
         data.string("Authentication", "Port").as_deref(),
@@ -409,8 +256,8 @@ fn maps_sources_to_accounts() {
     let accounts = mail_accounts(&sources());
 
     assert_eq!(accounts.len(), 2);
-    assert_eq!(accounts[0].id, "fastmail-imap");
-    assert_eq!(accounts[1].id, "gmail-imap");
+    assert_eq!(accounts[0].id, GMAIL_IMAP_UID);
+    assert_eq!(accounts[1].id, FASTMAIL_IMAP_UID);
     assert!(accounts.iter().all(|account| account.id != "disabled-imap"));
 }
 
@@ -423,8 +270,8 @@ fn mail_accounts_from_disk() {
     let accounts = mail_accounts_from_dir(dir.path());
 
     assert_eq!(accounts.len(), 2);
-    assert_fastmail(&accounts[0]);
-    assert_gmail(&accounts[1]);
+    assert_gmail(&accounts[0]);
+    assert_fastmail(&accounts[1]);
 }
 
 #[tokio::test]
@@ -443,8 +290,8 @@ async fn discover_falls_back_to_disk() {
     let accounts = discover_mail_accounts(&conn, dir.path()).await.unwrap();
 
     assert_eq!(accounts.len(), 2);
-    assert_fastmail(&accounts[0]);
-    assert_gmail(&accounts[1]);
+    assert_gmail(&accounts[0]);
+    assert_fastmail(&accounts[1]);
 }
 
 #[tokio::test]

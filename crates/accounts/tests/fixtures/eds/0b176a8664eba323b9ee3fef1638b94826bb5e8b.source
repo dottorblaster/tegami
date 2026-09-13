@@ -1,0 +1,50 @@
+[Data Source]
+DisplayName=user@googlemail.example.org
+Enabled=true
+Parent=ac118492bbfdbb3f5e8f9dbc04de89ce6ab75bd0
+
+[Mail Submission]
+SentFolder=folder://local/Sent
+TransportUid=d0669aa7f547a31b7460f04a991409ebae129940
+RepliesToOriginFolder=false
+UseSentFolder=true
+
+[Mail Composition]
+Bcc=
+Cc=
+DraftsFolder=folder://6065d502a22c5cde5f8d8d9f390718534b450c4a/%5bGmail%5d/Drafts
+ReplyStyle=default
+SignImip=true
+TemplatesFolder=
+StartBottom=inconsistent
+TopSignature=inconsistent
+Language=
+
+[Mail Identity]
+Address=user@googlemail.example.org
+Aliases=
+Name=user@googlemail.example.org
+Organization=
+ReplyTo=
+SignatureUid=none
+
+[Pretty Good Privacy (OpenPGP)]
+AlwaysTrust=false
+EncryptToSelf=true
+KeyId=
+SigningAlgorithm=
+SignByDefault=false
+EncryptByDefault=false
+PreferInline=false
+LocateKeys=true
+SendPublicKey=true
+SendPreferEncrypt=true
+AskSendPublicKey=true
+
+[Secure MIME (S/MIME)]
+EncryptionCertificate=
+EncryptByDefault=false
+EncryptToSelf=true
+SigningAlgorithm=
+SigningCertificate=
+SignByDefault=false

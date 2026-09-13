@@ -1,0 +1,24 @@
+{
+  "/org/gnome/OnlineAccounts/Accounts/account_1711276543_15": [
+    "org.gnome.OnlineAccounts.Account",
+    "org.gnome.OnlineAccounts.Calendar",
+    "org.gnome.OnlineAccounts.Contacts",
+    "org.gnome.OnlineAccounts.Files",
+    "org.gnome.OnlineAccounts.PasswordBased"
+  ],
+  "/org/gnome/OnlineAccounts/Accounts/account_1767350577_0": [
+    "org.gnome.OnlineAccounts.Account",
+    "org.gnome.OnlineAccounts.Mail",
+    "org.gnome.OnlineAccounts.PasswordBased"
+  ],
+  "/org/gnome/OnlineAccounts/Accounts/account_1783762501_0": [
+    "org.gnome.OnlineAccounts.Account",
+    "org.gnome.OnlineAccounts.Calendar",
+    "org.gnome.OnlineAccounts.Contacts",
+    "org.gnome.OnlineAccounts.Mail",
+    "org.gnome.OnlineAccounts.OAuth2Based"
+  ],
+  "/org/gnome/OnlineAccounts/Manager": [
+    "org.gnome.OnlineAccounts.Manager"
+  ]
+}

@@ -7,8 +7,10 @@
 //! keeps the ones implementing `org.gnome.OnlineAccounts.Mail` and maps them
 //! to [`mail_core::account::AccountConfig`].
 
+use std::collections::HashMap;
+
 use zbus::connection::Connection;
-use zbus::zvariant::OwnedObjectPath;
+use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
 use mail_core::account::{AccountConfig, ImapConfig, SmtpConfig};
 
@@ -39,8 +41,7 @@ pub async fn enumerate_accounts(connection: &Connection) -> zbus::Result<Vec<Mai
     let mut accounts = Vec::new();
     for (path, interfaces) in objects {
         let oauth2 = interfaces.contains_key(OAUTH2_INTERFACE);
-        if interfaces.contains_key(MAIL_INTERFACE)
-            && interfaces.contains_key(ACCOUNT_INTERFACE)
+        if is_mail_object(&interfaces)
             && let Some(account) = mail_account(connection, path, oauth2).await
         {
             accounts.push(account);
@@ -48,6 +49,10 @@ pub async fn enumerate_accounts(connection: &Connection) -> zbus::Result<Vec<Mai
     }
     accounts.sort_by(|a, b| a.config.id.cmp(&b.config.id));
     Ok(accounts)
+}
+
+pub fn is_mail_object(interfaces: &HashMap<String, HashMap<String, OwnedValue>>) -> bool {
+    interfaces.contains_key(MAIL_INTERFACE) && interfaces.contains_key(ACCOUNT_INTERFACE)
 }
 
 async fn mail_account(

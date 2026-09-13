@@ -1,0 +1,29 @@
+[Data Source]
+DisplayName=user@fastmail.example.org
+Enabled=true
+Parent=8c0a229b1ed98a15a2b85b77e332396f082e57ef
+
+[Mail Submission]
+SentFolder=folder://c68d7f1afb422dd27c3f4cd098ba2be01b514e58/Sent
+TransportUid=07333698cc03117632160cb8de2cc6bf11df61cb
+RepliesToOriginFolder=false
+UseSentFolder=true
+
+[Mail Composition]
+Bcc=
+Cc=
+DraftsFolder=folder://c68d7f1afb422dd27c3f4cd098ba2be01b514e58/Drafts
+ReplyStyle=default
+SignImip=true
+TemplatesFolder=
+StartBottom=inconsistent
+TopSignature=inconsistent
+Language=
+
+[Mail Identity]
+Address=user@fastmail.example.org
+Aliases=
+Name=Fixture User
+Organization=
+ReplyTo=
+SignatureUid=none

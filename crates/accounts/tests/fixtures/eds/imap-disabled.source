@@ -1,0 +1,31 @@
+[Data Source]
+DisplayName=user@legacy.example.org
+Enabled=false
+Parent=
+
+[Mail Account]
+BackendName=imapx
+IdentityUid=disabled-identity
+ArchiveFolder=
+NeedsInitialSetup=false
+MarkSeen=inconsistent
+MarkSeenTimeout=1500
+Builtin=false
+
+[Authentication]
+Host=imap.legacy.example.org
+Method=PLAIN
+Port=993
+ProxyUid=system-proxy
+RememberPassword=true
+User=user@legacy.example.org
+CredentialName=
+IsExternal=false
+
+[Security]
+Method=starttls-on-standard-port
+
+[Imapx Backend]
+UseIdle=true
+UseQresync=false
+UseSubscriptions=false
