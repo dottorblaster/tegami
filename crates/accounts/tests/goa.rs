@@ -2,8 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
-use accounts::goa::{AccountProxy, MailProxy, OAuth2BasedProxy, ObjectManagerProxy};
+use accounts::goa::{
+    AccountProxy, MailProxy, OAuth2BasedProxy, OAuth2TokenCache, ObjectManagerProxy,
+};
 use zbus::connection::{Builder, Connection};
 use zbus::interface;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
@@ -166,7 +170,10 @@ impl MockMail {
     }
 }
 
-struct MockOAuth2;
+struct MockOAuth2 {
+    expires_in: i32,
+    calls: AtomicU32,
+}
 
 #[interface(name = "org.gnome.OnlineAccounts.OAuth2Based")]
 impl MockOAuth2 {
@@ -181,7 +188,8 @@ impl MockOAuth2 {
     }
 
     fn get_access_token(&self) -> (String, i32) {
-        ("mock-token".to_string(), 3600)
+        let calls = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        (format!("mock-token-{calls}"), self.expires_in)
     }
 }
 
@@ -205,6 +213,11 @@ impl MockObjectManager {
         );
         let mut account_imap_less = account.clone();
         account_imap_less.insert("org.gnome.OnlineAccounts.Mail".to_string(), HashMap::new());
+        let mut account_with_oauth2 = account.clone();
+        account_with_oauth2.insert(
+            "org.gnome.OnlineAccounts.OAuth2Based".to_string(),
+            HashMap::new(),
+        );
 
         let mut objects = HashMap::new();
         objects.insert(
@@ -213,7 +226,7 @@ impl MockObjectManager {
         );
         objects.insert(
             OwnedObjectPath::try_from("/org/gnome/OnlineAccounts/Accounts/2").unwrap(),
-            account,
+            account_with_oauth2,
         );
         objects.insert(
             OwnedObjectPath::try_from("/org/gnome/OnlineAccounts/Accounts/3").unwrap(),
@@ -264,11 +277,30 @@ async fn serve(conn: &Connection) -> Option<()> {
         .at(ACCOUNT_PATH, mail("mock@example.org", true))
         .await
         .ok()?;
-    server.at(ACCOUNT_PATH, MockOAuth2).await.ok()?;
+    server
+        .at(
+            ACCOUNT_PATH,
+            MockOAuth2 {
+                expires_in: 3600,
+                calls: AtomicU32::new(0),
+            },
+        )
+        .await
+        .ok()?;
     server
         .at(
             "/org/gnome/OnlineAccounts/Accounts/2",
             account("2", "exchange", "other@example.org"),
+        )
+        .await
+        .ok()?;
+    server
+        .at(
+            "/org/gnome/OnlineAccounts/Accounts/2",
+            MockOAuth2 {
+                expires_in: 1,
+                calls: AtomicU32::new(0),
+            },
         )
         .await
         .ok()?;
@@ -366,7 +398,7 @@ async fn oauth2_interface() {
     assert_eq!(oauth2.client_secret().await.unwrap(), "mock-secret");
     assert_eq!(
         oauth2.get_access_token().await.unwrap(),
-        ("mock-token".to_string(), 3600)
+        ("mock-token-1".to_string(), 3600)
     );
 }
 
@@ -425,4 +457,32 @@ async fn enumerate_mail_accounts() {
     assert_eq!(second.provider_type.as_deref(), Some("google"));
     assert!(second.imap.is_none());
     assert!(second.smtp.is_some());
+}
+
+#[tokio::test]
+async fn oauth2_token_cache() {
+    let Some((conn, _guard)) = busy_setup().await else {
+        return;
+    };
+
+    let cache = OAuth2TokenCache::new();
+    let first = cache.access_token(&conn, ACCOUNT_PATH).await.unwrap();
+    let second = cache.access_token(&conn, ACCOUNT_PATH).await.unwrap();
+    assert_eq!(first, "mock-token-1");
+    assert_eq!(second, "mock-token-1");
+}
+
+#[tokio::test]
+async fn oauth2_token_refresh_on_expiry() {
+    let Some((conn, _guard)) = busy_setup().await else {
+        return;
+    };
+
+    let cache = OAuth2TokenCache::with_refresh_margin(Duration::ZERO);
+    let path = "/org/gnome/OnlineAccounts/Accounts/2";
+    let first = cache.access_token(&conn, path).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let second = cache.access_token(&conn, path).await.unwrap();
+    assert_eq!(first, "mock-token-1");
+    assert_eq!(second, "mock-token-2");
 }
