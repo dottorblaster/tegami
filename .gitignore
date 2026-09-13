@@ -1,1 +1,8 @@
 AGENTS.md
+
+/debug/
+/target/
+
+**/*.rs.bk
+
+*.pdb

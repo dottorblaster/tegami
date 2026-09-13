@@ -1,0 +1,27 @@
+# Tegami -- a mail client for GNOME.
+#
+# Workspace layout:
+#   crates/mail-core  -- UI-free mail model and backend abstractions
+#   crates/accounts   -- GOA-backed account discovery + credentials
+#   crates/app        -- the GNOME application shell
+
+[workspace]
+resolver = "3"
+members = ["crates/mail-core", "crates/accounts", "crates/app"]
+
+# Metadata shared by every member via `version.workspace = true` & co.,
+# so they stay in lockstep.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# MSRV: pinned to 1.85 -- the first stable release supporting edition
+# 2024. Bump deliberately; CI runs `cargo check` on this toolchain to
+# enforce the floor (see #4).
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/dottorblaster/tegami"
+authors = ["Alessio Biancalana"]
+
+# Lints applied to every crate in the workspace.
+[workspace.lints.rust]
+unsafe_code = "deny"
