@@ -38,7 +38,7 @@ jobs:
         run: |
           dnf install --assumeyes --quiet dbus-daemon cpio
           cd /
-          dnf download --assumeyes libadwaita libadwaita-devel
+          dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
           rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
           rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
           rm -f libadwaita*.rpm
@@ -70,7 +70,7 @@ jobs:
         run: |
           dnf install --assumeyes --quiet cpio
           cd /
-          dnf download --assumeyes libadwaita libadwaita-devel
+          dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
           rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
           rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
           rm -f libadwaita*.rpm
@@ -101,7 +101,7 @@ jobs:
         run: |
           dnf install --assumeyes --quiet cpio
           cd /
-          dnf download --assumeyes libadwaita libadwaita-devel
+          dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
           rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
           rpm2cpio libadwaita-1*.rpm | cpio -id './usr/lib64/girepository-1.0/*'
           rm -f libadwaita*.rpm
