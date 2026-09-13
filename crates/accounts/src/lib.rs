@@ -9,4 +9,5 @@
 //! through the Secret Service. UI-free on purpose, so the logic can be
 //! tested headless.
 
+pub mod eds;
 pub mod goa;
