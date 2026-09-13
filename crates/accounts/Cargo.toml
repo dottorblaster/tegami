@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 glib = "0.22"
 mail-core = { path = "../mail-core" }
+oo7 = "0.6.0"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
 [dev-dependencies]

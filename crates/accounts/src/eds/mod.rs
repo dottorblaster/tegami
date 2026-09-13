@@ -14,9 +14,11 @@
 pub mod discover;
 pub mod enumerate;
 pub mod parse;
+pub mod secret;
 pub mod source;
 
 pub use discover::{default_sources_dir, discover_mail_accounts, mail_accounts_from_dir};
 pub use enumerate::enumerate_mail_accounts;
 pub use parse::SourceData;
+pub use secret::{SCHEMA_ATTRIBUTE, SOURCE_SCHEMA, SOURCE_UID_ATTRIBUTE, password_for_source};
 pub use source::{ObjectManagerProxy, SourceProxy};
