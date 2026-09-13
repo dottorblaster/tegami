@@ -14,10 +14,10 @@ members = ["crates/mail-core", "crates/accounts", "crates/app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# MSRV: pinned to 1.85 -- the first stable release supporting edition
-# 2024. Bump deliberately; CI runs `cargo check` on this toolchain to
-# enforce the floor (see #4).
-rust-version = "1.85"
+# MSRV: pinned to 1.93 -- the floor imposed by relm4/gtk4-rs (cairo-rs
+# requires 1.92, relm4 1.93). CI runs `cargo check` on this toolchain to
+# enforce the floor (see #4). Bump deliberately.
+rust-version = "1.93"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/dottorblaster/tegami"
 authors = ["Alessio Biancalana"]

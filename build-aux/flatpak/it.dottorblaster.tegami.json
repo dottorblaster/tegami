@@ -1,0 +1,39 @@
+{
+  "app-id": "it.dottorblaster.tegami",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "50",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
+  "command": "tegami",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin",
+    "env": {
+      "CARGO_HOME": "/run/build/tegami/cargo"
+    }
+  },
+  "modules": [
+    {
+      "name": "tegami",
+      "buildsystem": "meson",
+      "builddir": true,
+      "config-opts": [
+        "-Dbuildtype=release"
+      ],
+      "sources": [
+        "cargo-sources.json",
+        {
+          "type": "dir",
+          "path": "../.."
+        }
+      ]
+    }
+  ]
+}

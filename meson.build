@@ -37,8 +37,6 @@ else
   rust_target = 'debug'
 endif
 
-cargo_home = meson.project_build_root() / 'cargo-home'
-
 custom_target(
   'cargo-build',
   build_by_default: true,
@@ -50,7 +48,6 @@ custom_target(
   depends: data_resources,
   command: [
     'env',
-    'CARGO_HOME=@0@'.format(cargo_home),
     'TEGAMI_RESOURCE_BUNDLE=@0@'.format(data_resources.full_path()),
     cargo, 'build', cargo_options,
     '&&',
