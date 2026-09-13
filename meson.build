@@ -48,6 +48,8 @@ custom_target(
   depends: data_resources,
   command: [
     'env',
+    'TEGAMI_APP_ID=@0@'.format(app_id),
+    'TEGAMI_VERSION=@0@'.format(meson.project_version()),
     'TEGAMI_RESOURCE_BUNDLE=@0@'.format(data_resources.full_path()),
     cargo, 'build', cargo_options,
     '&&',

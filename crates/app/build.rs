@@ -6,6 +6,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    let app_id =
+        env::var("TEGAMI_APP_ID").unwrap_or_else(|_| "it.dottorblaster.tegami".to_string());
+    let version =
+        env::var("TEGAMI_VERSION").unwrap_or_else(|_| env::var("CARGO_PKG_VERSION").unwrap());
+    println!("cargo:rustc-env=TEGAMI_APP_ID={app_id}");
+    println!("cargo:rustc-env=TEGAMI_VERSION={version}");
+    println!("cargo:rerun-if-env-changed=TEGAMI_APP_ID");
+    println!("cargo:rerun-if-env-changed=TEGAMI_VERSION");
+
     if let Some(bundle) = env::var_os("TEGAMI_RESOURCE_BUNDLE") {
         let path = PathBuf::from(&bundle);
         if path.exists() {

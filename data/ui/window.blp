@@ -3,18 +3,21 @@ using Adw 1;
 
 Adw.ApplicationWindow hello {
   title: "Tegami";
-  default-width: 720;
-  default-height: 480;
+  default-width: 1080;
+  default-height: 720;
 
-  Gtk.Box {
-    orientation: vertical;
-    spacing: 12;
-    halign: center;
-    valign: center;
-
-    Gtk.Label {
-      label: "Hello, Tegami!";
-      css-classes: ["title-1"];
+  content: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      [end]
+      Gtk.MenuButton {
+        icon-name: "open-menu-symbolic";
+      }
     }
-  }
+
+    content: Gtk.Box {
+      hexpand: true;
+      vexpand: true;
+    };
+  };
 }
