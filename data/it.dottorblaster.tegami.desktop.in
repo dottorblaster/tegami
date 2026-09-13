@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Tegami
+Comment=Mail client for GNOME
+Exec=tegami
+Icon=@app-id@
+Terminal=false
+Type=Application
+Categories=Network;Email;
+Keywords=mail;email;
+StartupNotify=true
+StartupWMClass=tegami

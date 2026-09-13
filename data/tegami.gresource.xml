@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/it/dottorblaster/tegami">
+    <file alias="style.css">resources/style.css</file>
+    <file alias="ui/window.ui">resources/window.ui</file>
+  </gresource>
+</gresources>

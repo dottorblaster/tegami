@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>@app-id@</id>
+  <name>Tegami</name>
+  <summary>Mail client for GNOME</summary>
+  <developer id="it.dottorblaster">
+    <name>Alessio Biancalana</name>
+  </developer>
+  <description>
+    <p>Tegami is a mail client for GNOME built with Rust and libadwaita.</p>
+  </description>
+  <launchable type="desktop-id">@app-id@.desktop</launchable>
+  <provides>
+    <binary>tegami</binary>
+  </provides>
+  <url type="homepage">https://github.com/dottorblaster/tegami</url>
+  <project_license>GPL-3.0-or-later</project_license>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-09-13"/>
+  </releases>
+</component>

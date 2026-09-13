@@ -2,6 +2,7 @@ AGENTS.md
 
 /debug/
 /target/
+/build/
 
 **/*.rs.bk
 
