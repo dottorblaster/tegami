@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_imap::extensions::idle::IdleResponse;
 use async_imap::types::{Flag, NameAttribute};
 use async_imap::{Client, Session};
 use futures_util::StreamExt;
@@ -148,6 +149,10 @@ impl MailBackend for ImapBackend {
         }
         self.session = Some(session);
         Ok(())
+    }
+
+    fn supports_idle(&self) -> bool {
+        self.supports_idle
     }
 
     fn supports_condstore(&self) -> bool {
@@ -378,18 +383,27 @@ impl MailBackend for ImapBackend {
         Ok(0)
     }
 
-    async fn idle(&mut self, _folder: &str) -> Result<()> {
+    async fn idle(&mut self, folder: &str) -> Result<()> {
         if !self.supports_idle {
             return Err(MailError::Protocol("IDLE not supported".to_string()));
         }
-        let session = self.session.take().ok_or(MailError::Disconnected)?;
-        let mut idle = session.idle();
-        idle.init().await.map_err(map_err)?;
-        let (wait, stop_source) = idle.wait_with_timeout(Duration::from_secs(29 * 60));
-        let _ = wait.await.map_err(map_err)?;
-        drop(stop_source);
-        self.session = Some(idle.done().await.map_err(map_err)?);
-        Ok(())
+        self.select_mailbox(folder).await?;
+        loop {
+            let session = self.session.take().ok_or(MailError::Disconnected)?;
+            let mut idle = session.idle();
+            idle.init().await.map_err(map_err)?;
+            let (wait, stop_source) = idle.wait_with_timeout(Duration::from_secs(29 * 60));
+            let response = wait.await.map_err(map_err)?;
+            drop(stop_source);
+            self.session = Some(idle.done().await.map_err(map_err)?);
+            match response {
+                IdleResponse::NewData(_) => return Ok(()),
+                IdleResponse::Timeout => continue,
+                IdleResponse::ManualInterrupt => {
+                    return Err(MailError::Protocol("idle interrupted".to_string()));
+                }
+            }
+        }
     }
 }
 

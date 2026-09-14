@@ -153,6 +153,10 @@ impl MailBackend for FakeBackend {
         Ok(())
     }
 
+    fn supports_idle(&self) -> bool {
+        false
+    }
+
     fn supports_condstore(&self) -> bool {
         self.condstore
     }

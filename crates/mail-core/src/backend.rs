@@ -73,6 +73,8 @@ pub trait MailBackend {
     /// Terminates the session gracefully.
     fn disconnect(&mut self) -> impl Future<Output = Result<()>> + Send;
 
+    fn supports_idle(&self) -> bool;
+
     fn supports_condstore(&self) -> bool;
 
     fn supports_qresync(&self) -> bool;

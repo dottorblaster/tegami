@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod body;
+mod idle;
 mod message;
 
 use std::collections::HashSet;
@@ -11,6 +12,7 @@ use crate::backend::MailError;
 use crate::store::{FolderRecord, MessageRecord, Store, StoreError};
 
 pub use body::{BodyFetch, fetch_body};
+pub use idle::{IdleEvent, IdleWorker};
 pub use message::message_record;
 
 #[derive(Debug)]
