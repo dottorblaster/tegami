@@ -50,14 +50,25 @@ impl From<std::io::Error> for MailError {
 
 pub type Result<T> = std::result::Result<T, MailError>;
 
+/// The secret used to authenticate against a mail store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Credential {
+    Password(String),
+    OAuth2(String),
+}
+
 /// A connection to a mail store.
 ///
 /// Every method returns a `Send` future so backends can be driven from
 /// spawned tasks.
 pub trait MailBackend {
-    /// Establishes the session for the given account and negotiates the
-    /// protocol version and authentication.
-    fn connect(&mut self, config: &AccountConfig) -> impl Future<Output = Result<()>> + Send;
+    /// Establishes the session for the given account, negotiates the
+    /// encryption layer and authenticates with the given credential.
+    fn connect(
+        &mut self,
+        config: &AccountConfig,
+        credential: &Credential,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     /// Terminates the session gracefully.
     fn disconnect(&mut self) -> impl Future<Output = Result<()>> + Send;

@@ -13,6 +13,6 @@ pub mod backend;
 pub mod envelope;
 pub mod folder;
 
-pub use backend::{MailBackend, MailError};
+pub use backend::{Credential, MailBackend, MailError};
 pub use envelope::{Address, Envelope, FlagChange, MessageFlags};
 pub use folder::{Folder, FolderRole, FolderState};

@@ -10,7 +10,7 @@ use mail_core::account::AccountConfig;
 use mail_core::backend::Result;
 use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
 use mail_core::folder::{Folder, FolderRole, FolderState};
-use mail_core::{MailBackend, MailError};
+use mail_core::{Credential, MailBackend, MailError};
 
 struct FakeMessage {
     envelope: Envelope,
@@ -86,7 +86,7 @@ impl FakeBackend {
 }
 
 impl MailBackend for FakeBackend {
-    async fn connect(&mut self, _config: &AccountConfig) -> Result<()> {
+    async fn connect(&mut self, _config: &AccountConfig, _credential: &Credential) -> Result<()> {
         if self.connected {
             return Err(MailError::Protocol("already connected".to_string()));
         }
@@ -277,7 +277,10 @@ async fn mail_backend_round_trip() {
         smtp: None,
     };
 
-    backend.connect(&config).await.unwrap();
+    backend
+        .connect(&config, &Credential::Password("hunter2".to_string()))
+        .await
+        .unwrap();
     let folders = backend.folders().await.unwrap();
     assert_eq!(folders.len(), 2);
     assert_eq!(folders[0].role, FolderRole::Other);
