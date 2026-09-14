@@ -24,6 +24,9 @@ pub trait Mail {
     fn imap_host(&self) -> zbus::Result<String>;
 
     #[zbus(property)]
+    fn imap_port(&self) -> zbus::Result<u32>;
+
+    #[zbus(property)]
     fn imap_use_ssl(&self) -> zbus::Result<bool>;
 
     #[zbus(property)]

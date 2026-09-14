@@ -461,7 +461,11 @@ async fn migration_backfills_fts_headers() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message.uid, 1);
     assert_eq!(
-        reopened.search(&fts_query("Sender"), 10).await.unwrap().len(),
+        reopened
+            .search(&fts_query("Sender"), 10)
+            .await
+            .unwrap()
+            .len(),
         1
     );
 }

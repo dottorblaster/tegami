@@ -95,7 +95,7 @@ impl MailBackend for ImapBackend {
             .imap
             .as_ref()
             .ok_or_else(|| MailError::Protocol("no imap configuration".to_string()))?;
-        let port = if imap.use_ssl { 993 } else { 143 };
+        let port = imap.port.unwrap_or(if imap.use_ssl { 993 } else { 143 });
         let tcp = TcpStream::connect((imap.host.as_str(), port)).await?;
         let connector = tokio_rustls::TlsConnector::from(tls_config()?);
         let server_name = rustls::pki_types::ServerName::try_from(imap.host.clone())

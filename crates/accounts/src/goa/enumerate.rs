@@ -85,6 +85,12 @@ async fn mail_account(
             use_ssl: mail.imap_use_ssl().await.ok()?,
             use_tls: mail.imap_use_tls().await.ok()?,
             user_name: mail.imap_user_name().await.ok()?,
+            port: mail
+                .imap_port()
+                .await
+                .ok()
+                .filter(|port| *port != 0)
+                .map(|port| port as u16),
         })
     } else {
         None

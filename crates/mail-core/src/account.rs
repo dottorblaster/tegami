@@ -25,6 +25,7 @@ pub struct ImapConfig {
     pub use_ssl: bool,
     pub use_tls: bool,
     pub user_name: String,
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

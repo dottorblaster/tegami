@@ -114,6 +114,11 @@ fn imap_config(source: &Source) -> Option<ImapConfig> {
             .data
             .string("Authentication", "User")
             .unwrap_or_default(),
+        port: source
+            .data
+            .string("Authentication", "Port")
+            .and_then(|port| port.parse().ok())
+            .filter(|port| *port != 0),
     })
 }
 

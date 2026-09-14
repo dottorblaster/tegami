@@ -28,6 +28,13 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/gtk-rs/gtk4-rs/gtk4:latest
+    services:
+      greenmail:
+        image: greenmail/standalone:2.1.13
+        env:
+          GREENMAIL_OPTS: "-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=user:pass@localhost"
+    env:
+      TEGAMI_GREENMAIL_HOST: greenmail
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

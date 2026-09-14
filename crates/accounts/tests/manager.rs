@@ -185,6 +185,11 @@ impl MockGoaMail {
     }
 
     #[zbus(property)]
+    fn imap_port(&self) -> u32 {
+        993
+    }
+
+    #[zbus(property)]
     fn imap_use_ssl(&self) -> bool {
         true
     }
@@ -412,6 +417,7 @@ fn goa_mail_account(entry: &GoaEntry) -> MailAccount {
                 use_ssl: true,
                 use_tls: false,
                 user_name: entry.email.clone(),
+                port: None,
             }),
             smtp: Some(SmtpConfig {
                 accept_ssl_errors: false,
@@ -449,6 +455,7 @@ fn merge_dedup_by_email() {
                 use_ssl: true,
                 use_tls: false,
                 user_name: "shared@example.org".to_string(),
+                port: None,
             }),
             smtp: None,
         },
@@ -464,6 +471,7 @@ fn merge_dedup_by_email() {
                 use_ssl: true,
                 use_tls: false,
                 user_name: "eds-only@example.org".to_string(),
+                port: None,
             }),
             smtp: None,
         },

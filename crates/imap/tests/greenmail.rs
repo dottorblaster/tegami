@@ -6,16 +6,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use imap::ImapBackend;
 use mail_core::account::{AccountConfig, ImapConfig};
 use mail_core::envelope::MessageFlags;
-use mail_core::store::{AccountRecord, AccountSource, AuthKind, Store};
-use mail_core::sync::{EnvelopeWindow, IdleEvent, IdleWorker, sync_account, sync_folder};
+use mail_core::store::{AccountRecord, AccountSource, AuthKind, BodyState, Store, fts_query};
+use mail_core::sync::{EnvelopeWindow, IdleEvent, IdleWorker, fetch_body, sync_account};
 use mail_core::{Credential, MailBackend};
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 fn greenmail_host() -> Option<String> {
     std::env::var("TEGAMI_GREENMAIL_HOST").ok()
 }
 
-fn config(host: &str) -> AccountConfig {
+fn greenmail_config(host: &str) -> AccountConfig {
     AccountConfig {
         id: "greenmail".to_string(),
         name: "GreenMail".to_string(),
@@ -28,6 +29,7 @@ fn config(host: &str) -> AccountConfig {
             use_ssl: false,
             use_tls: false,
             user_name: "user".to_string(),
+            port: Some(3143),
         }),
         smtp: None,
     }
@@ -54,7 +56,10 @@ fn account_record() -> AccountRecord {
 async fn connect(host: &str) -> ImapBackend {
     let mut backend = ImapBackend::new();
     backend
-        .connect(&config(host), &Credential::Password("pass".to_string()))
+        .connect(
+            &greenmail_config(host),
+            &Credential::Password("pass".to_string()),
+        )
         .await
         .unwrap();
     backend
@@ -75,6 +80,13 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
+async fn setup(host: &str) -> (ImapBackend, Store, i64) {
+    let backend = connect(host).await;
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account_record()).await.unwrap();
+    (backend, store, account_id)
+}
+
 async fn inbox(store: &Store, account_id: i64) -> i64 {
     store
         .folders(account_id)
@@ -88,13 +100,12 @@ async fn inbox(store: &Store, account_id: i64) -> i64 {
 }
 
 #[tokio::test]
-async fn sync_qresync_fallback_and_idle_against_greenmail() {
+async fn sync_uses_uid_rescan_fallback_without_condstore() {
     let Some(host) = greenmail_host() else {
         eprintln!("skipping: set TEGAMI_GREENMAIL_HOST to run GreenMail tests");
         return;
     };
-
-    let mut backend = connect(&host).await;
+    let (mut backend, store, account_id) = setup(&host).await;
     assert!(!backend.supports_condstore());
     assert!(!backend.supports_qresync());
 
@@ -104,32 +115,124 @@ async fn sync_qresync_fallback_and_idle_against_greenmail() {
         .await
         .unwrap();
 
-    let store = Store::open(":memory:").unwrap();
-    let account_id = store.upsert_account(account_record()).await.unwrap();
-    sync_account(&mut backend, &store, account_id, EnvelopeWindow::new(50))
+    let reports = sync_account(&mut backend, &store, account_id, EnvelopeWindow::new(1000))
         .await
         .unwrap();
-
+    assert!(reports.iter().all(|report| !report.incremental));
     let inbox_id = inbox(&store, account_id).await;
     let messages = store.messages(inbox_id).await.unwrap();
     assert!(messages.iter().any(|message| message.subject == subject));
 
-    let idle_backend = connect(&host).await;
-    let (sender, mut receiver) = mpsc::channel(4);
-    let worker = IdleWorker::spawn(idle_backend, "INBOX", sender);
+    let folder = store
+        .folders(account_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|folder| folder.name == "INBOX")
+        .unwrap();
+    let second =
+        mail_core::sync::sync_folder(&mut backend, &store, &folder, EnvelopeWindow::new(1000))
+            .await
+            .unwrap();
+    assert!(!second.incremental);
+    assert_eq!(second.changed, 0);
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let idle_subject = unique("tegami-idle");
+    let second_subject = unique("tegami-sync");
     backend
         .append(
             "INBOX",
             MessageFlags::default(),
-            &raw_message(&idle_subject),
+            &raw_message(&second_subject),
         )
         .await
         .unwrap();
+    let third =
+        mail_core::sync::sync_folder(&mut backend, &store, &folder, EnvelopeWindow::new(1000))
+            .await
+            .unwrap();
+    assert!(!third.incremental);
+    assert!(third.changed >= 1);
+    let messages = store.messages(inbox_id).await.unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.subject == second_subject)
+    );
+}
 
-    let event = tokio::time::timeout(Duration::from_secs(30), receiver.recv())
+#[tokio::test]
+async fn fetch_body_caches_raw_and_indexes_text() {
+    let Some(host) = greenmail_host() else {
+        eprintln!("skipping: set TEGAMI_GREENMAIL_HOST to run GreenMail tests");
+        return;
+    };
+    let (mut backend, store, account_id) = setup(&host).await;
+
+    let subject = unique("tegami-body");
+    backend
+        .append("INBOX", MessageFlags::default(), &raw_message(&subject))
+        .await
+        .unwrap();
+    sync_account(&mut backend, &store, account_id, EnvelopeWindow::new(1000))
+        .await
+        .unwrap();
+
+    let inbox_id = inbox(&store, account_id).await;
+    let target = store
+        .messages(inbox_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|message| message.subject == subject)
+        .unwrap();
+    assert_eq!(target.body_state, BodyState::None);
+
+    let dir = TempDir::new().unwrap();
+    let fetched = fetch_body(
+        &mut backend,
+        &store,
+        "INBOX",
+        inbox_id,
+        target.uid,
+        dir.path(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fetched.attachments, 0);
+
+    let stored = store.message(inbox_id, target.uid).await.unwrap().unwrap();
+    assert_eq!(stored.body_state, BodyState::Full);
+    assert!(stored.raw_path.as_deref().is_some());
+    assert_eq!(
+        std::fs::read(stored.raw_path.as_deref().unwrap()).unwrap(),
+        raw_message(&subject)
+    );
+
+    let hits = store.search(&fts_query("Body"), 100).await.unwrap();
+    assert!(
+        hits.iter()
+            .any(|hit| hit.message.uid == target.uid && hit.snippet.contains("Body"))
+    );
+}
+
+#[tokio::test]
+async fn idle_detects_new_mail() {
+    let Some(host) = greenmail_host() else {
+        eprintln!("skipping: set TEGAMI_GREENMAIL_HOST to run GreenMail tests");
+        return;
+    };
+    let mut sender = connect(&host).await;
+    let (event_tx, mut event_rx) = mpsc::channel(4);
+    let worker = IdleWorker::spawn(connect(&host).await, "INBOX", event_tx);
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let subject = unique("tegami-idle");
+    sender
+        .append("INBOX", MessageFlags::default(), &raw_message(&subject))
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(30), event_rx.recv())
         .await
         .expect("idle event timed out")
         .expect("idle channel closed");
@@ -140,24 +243,4 @@ async fn sync_qresync_fallback_and_idle_against_greenmail() {
         }
     );
     worker.abort();
-
-    let folder = store
-        .folders(account_id)
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|folder| folder.name == "INBOX")
-        .unwrap();
-    let report = sync_folder(&mut backend, &store, &folder, EnvelopeWindow::new(50))
-        .await
-        .unwrap();
-    assert!(!report.incremental);
-    assert!(report.changed >= 1);
-
-    let messages = store.messages(inbox_id).await.unwrap();
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.subject == idle_subject)
-    );
 }

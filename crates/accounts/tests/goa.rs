@@ -105,6 +105,11 @@ impl MockMail {
     }
 
     #[zbus(property)]
+    fn imap_port(&self) -> u32 {
+        993
+    }
+
+    #[zbus(property)]
     fn imap_use_ssl(&self) -> bool {
         true
     }
@@ -441,6 +446,7 @@ async fn enumerate_mail_accounts() {
     assert!(imap.use_ssl);
     assert!(!imap.use_tls);
     assert!(!imap.accept_ssl_errors);
+    assert_eq!(imap.port, Some(993));
     let smtp = first.smtp.as_ref().unwrap();
     assert_eq!(smtp.host, "smtp.example.org");
     assert_eq!(smtp.user_name, "mock@example.org");

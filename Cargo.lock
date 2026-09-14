@@ -1255,6 +1255,7 @@ dependencies = [
  "mail-core",
  "rustls",
  "rustls-native-certs",
+ "tempfile",
  "tokio",
  "tokio-rustls",
 ]
