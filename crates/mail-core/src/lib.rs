@@ -9,3 +9,10 @@
 //! specifics here, so it stays easy to unit test in isolation.
 
 pub mod account;
+pub mod backend;
+pub mod envelope;
+pub mod folder;
+
+pub use backend::{MailBackend, MailError};
+pub use envelope::{Address, Envelope, FlagChange, MessageFlags};
+pub use folder::{Folder, FolderRole, FolderState};
