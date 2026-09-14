@@ -17,7 +17,7 @@ mod worker;
 pub use error::{StoreError, StoreResult};
 pub use models::{
     AccountRecord, AccountSource, AttachmentRecord, AuthKind, BodyState, FolderRecord,
-    MessageRecord, OpKind, PendingOpRecord, Security, SpecialUse,
+    MessageRecord, OpKind, PendingOpRecord, SearchHit, Security, SpecialUse,
 };
 pub use worker::Store;
 
@@ -55,4 +55,12 @@ pub fn bits_to_flags(bits: i64) -> crate::envelope::MessageFlags {
         draft: bits & FLAG_DRAFT != 0,
         deleted: bits & FLAG_DELETED != 0,
     }
+}
+
+pub fn fts_query(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|token| format!("\"{}\"*", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }

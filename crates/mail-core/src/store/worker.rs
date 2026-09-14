@@ -17,7 +17,7 @@ use super::error::{StoreError, StoreResult};
 use super::models::{
     ACCOUNT_COLUMNS, ATTACHMENT_COLUMNS, AccountRecord, AttachmentRecord, BodyState,
     FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord, PENDING_OP_COLUMNS,
-    PendingOpRecord,
+    PendingOpRecord, SearchHit,
 };
 use super::schema;
 
@@ -108,6 +108,16 @@ enum Command {
     DeleteOp {
         id: i64,
         reply: oneshot::Sender<StoreResult<()>>,
+    },
+    IndexBody {
+        message_id: i64,
+        text: String,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    Search {
+        query: String,
+        limit: i64,
+        reply: oneshot::Sender<StoreResult<Vec<SearchHit>>>,
     },
     SetMessageFlags {
         folder_id: i64,
@@ -288,6 +298,28 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn index_body(&self, message_id: i64, text: String) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::IndexBody {
+            message_id,
+            text,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn search(&self, query: &str, limit: i64) -> StoreResult<Vec<SearchHit>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::Search {
+            query: query.to_string(),
+            limit,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn messages(&self, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::Messages { folder_id, reply }).await?;
@@ -387,9 +419,9 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
                 folder_id,
                 uids,
                 reply,
-            } => reply_send(reply, delete_messages(&connection, folder_id, &uids)),
+            } => reply_send(reply, delete_messages(&mut connection, folder_id, &uids)),
             Command::ClearMessages { folder_id, reply } => {
-                reply_send(reply, clear_messages(&connection, folder_id))
+                reply_send(reply, clear_messages(&mut connection, folder_id))
             }
             Command::SetMessageBody {
                 folder_id,
@@ -425,6 +457,16 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
                 reply_send(reply, pending_ops(&connection, account_id))
             }
             Command::DeleteOp { id, reply } => reply_send(reply, delete_op(&connection, id)),
+            Command::IndexBody {
+                message_id,
+                text,
+                reply,
+            } => reply_send(reply, index_body(&connection, message_id, &text)),
+            Command::Search {
+                query,
+                limit,
+                reply,
+            } => reply_send(reply, search(&connection, &query, limit)),
             Command::Messages { folder_id, reply } => {
                 reply_send(reply, messages(&connection, folder_id))
             }
@@ -626,23 +668,36 @@ fn message_uids(connection: &Connection, folder_id: i64) -> StoreResult<Vec<u32>
     Ok(rows)
 }
 
-fn delete_messages(connection: &Connection, folder_id: i64, uids: &[u32]) -> StoreResult<()> {
+fn delete_messages(connection: &mut Connection, folder_id: i64, uids: &[u32]) -> StoreResult<()> {
     if uids.is_empty() {
         return Ok(());
     }
     let placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-    let sql = format!("DELETE FROM message WHERE folder_id = ?1 AND uid IN ({placeholders})");
+    let fts_sql = format!(
+        "DELETE FROM message_fts WHERE rowid IN (SELECT id FROM message WHERE folder_id = ?1 AND uid IN ({placeholders}))"
+    );
+    let message_sql =
+        format!("DELETE FROM message WHERE folder_id = ?1 AND uid IN ({placeholders})");
     let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(uids.len() + 1);
     params.push(&folder_id);
     for uid in uids {
         params.push(uid);
     }
-    connection.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+    let transaction = connection.transaction()?;
+    transaction.execute(&fts_sql, rusqlite::params_from_iter(params.iter()))?;
+    transaction.execute(&message_sql, rusqlite::params_from_iter(params.iter()))?;
+    transaction.commit()?;
     Ok(())
 }
 
-fn clear_messages(connection: &Connection, folder_id: i64) -> StoreResult<()> {
-    connection.execute("DELETE FROM message WHERE folder_id = ?1", [folder_id])?;
+fn clear_messages(connection: &mut Connection, folder_id: i64) -> StoreResult<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute(
+        "DELETE FROM message_fts WHERE rowid IN (SELECT id FROM message WHERE folder_id = ?1)",
+        [folder_id],
+    )?;
+    transaction.execute("DELETE FROM message WHERE folder_id = ?1", [folder_id])?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -768,7 +823,7 @@ fn message(
 }
 
 fn upsert_message(connection: &Connection, message: &MessageRecord) -> StoreResult<i64> {
-    connection.execute(
+    let message_id = connection.query_row(
         "INSERT INTO message (folder_id, uid, modseq, message_id, thread_id, subject, from_addr, from_name, to_addrs, cc_addrs, date_sent, date_recv, in_reply_to, refs, flags, has_attach, size, structure, raw_path, body_state)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
          ON CONFLICT(folder_id, uid) DO UPDATE SET
@@ -778,7 +833,8 @@ fn upsert_message(connection: &Connection, message: &MessageRecord) -> StoreResu
            date_sent = excluded.date_sent, date_recv = excluded.date_recv,
            in_reply_to = excluded.in_reply_to, refs = excluded.refs,
            flags = excluded.flags, has_attach = excluded.has_attach, size = excluded.size,
-           structure = excluded.structure, raw_path = excluded.raw_path, body_state = excluded.body_state",
+           structure = excluded.structure, raw_path = excluded.raw_path, body_state = excluded.body_state
+         RETURNING id",
         rusqlite::params![
             message.folder_id,
             message.uid,
@@ -801,8 +857,72 @@ fn upsert_message(connection: &Connection, message: &MessageRecord) -> StoreResu
             message.raw_path,
             message.body_state.as_str(),
         ],
+        |row| row.get(0),
     )?;
-    Ok(connection.last_insert_rowid())
+    index_message(connection, message, message_id)?;
+    Ok(message_id)
+}
+
+fn index_message(
+    connection: &Connection,
+    message: &MessageRecord,
+    message_id: i64,
+) -> StoreResult<()> {
+    let from_text = header_text([message.from_name.as_deref(), message.from_addr.as_deref()]);
+    let to_text = header_text([message.to_addrs.as_deref(), message.cc_addrs.as_deref()]);
+    let updated = connection.execute(
+        "UPDATE message_fts SET subject = ?1, from_text = ?2, to_text = ?3 WHERE rowid = ?4",
+        rusqlite::params![message.subject, from_text, to_text, message_id],
+    )?;
+    if updated == 0 {
+        connection.execute(
+            "INSERT INTO message_fts (rowid, subject, from_text, to_text, body_text) VALUES (?1, ?2, ?3, ?4, '')",
+            rusqlite::params![message_id, message.subject, from_text, to_text],
+        )?;
+    }
+    Ok(())
+}
+
+fn header_text<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> String {
+    values.into_iter().flatten().collect::<Vec<_>>().join(" ")
+}
+
+fn index_body(connection: &Connection, message_id: i64, body_text: &str) -> StoreResult<()> {
+    let updated = connection.execute(
+        "UPDATE message_fts SET body_text = ?1 WHERE rowid = ?2",
+        rusqlite::params![body_text, message_id],
+    )?;
+    if updated == 0 {
+        return Err(StoreError::Protocol(format!(
+            "no fts row for message {message_id}"
+        )));
+    }
+    Ok(())
+}
+
+fn search(connection: &Connection, query: &str, limit: i64) -> StoreResult<Vec<SearchHit>> {
+    let columns = MESSAGE_COLUMNS
+        .split(", ")
+        .map(|column| format!("message.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT {columns}, snippet(message_fts, -1, '[', ']', '...', 12)
+         FROM message_fts
+         JOIN message ON message.id = message_fts.rowid
+         WHERE message_fts MATCH ?1
+         ORDER BY rank
+         LIMIT ?2"
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let hits = statement
+        .query_map(rusqlite::params![query, limit], |row| {
+            let message = MessageRecord::from_row(row)?;
+            let snippet: String = row.get(21)?;
+            Ok(SearchHit { message, snippet })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(hits)
 }
 
 fn upsert_messages(connection: &mut Connection, messages: &[MessageRecord]) -> StoreResult<()> {

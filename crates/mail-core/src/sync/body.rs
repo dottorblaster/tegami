@@ -36,15 +36,18 @@ pub async fn fetch_body<B: MailBackend + ?Sized>(
     let raw_path = body_dir.join(format!("{folder_id}-{uid}.eml"));
     tokio::fs::write(&raw_path, &raw).await?;
 
-    let attachments: Vec<AttachmentRecord> = crate::mime::parse(&raw)
-        .map(|parsed| {
-            parsed
-                .attachments
-                .iter()
-                .map(|attachment| attachment_record(message_id, attachment))
-                .collect()
-        })
-        .unwrap_or_default();
+    let (attachments, body_text): (Vec<AttachmentRecord>, Option<String>) =
+        match crate::mime::parse(&raw) {
+            Some(parsed) => {
+                let attachments = parsed
+                    .attachments
+                    .iter()
+                    .map(|attachment| attachment_record(message_id, attachment))
+                    .collect();
+                (attachments, parsed.text.or(parsed.html))
+            }
+            None => (Vec::new(), None),
+        };
     let attachment_count = attachments.len();
 
     store
@@ -57,6 +60,9 @@ pub async fn fetch_body<B: MailBackend + ?Sized>(
         )
         .await?;
     store.replace_attachments(message_id, attachments).await?;
+    if let Some(text) = body_text {
+        store.index_body(message_id, text).await?;
+    }
 
     Ok(BodyFetch {
         message_id,

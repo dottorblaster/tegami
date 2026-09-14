@@ -4,7 +4,7 @@
 use mail_core::store::{
     AccountRecord, AccountSource, AttachmentRecord, AuthKind, BodyState, FLAG_FLAGGED, FLAG_SEEN,
     FolderRecord, MessageRecord, OpKind, PendingOpRecord, Security, SpecialUse, Store,
-    bits_to_flags, flags_to_bits,
+    bits_to_flags, flags_to_bits, fts_query,
 };
 use tempfile::TempDir;
 
@@ -375,4 +375,60 @@ async fn pending_ops_round_trip() {
 
     store.delete_op(id).await.unwrap();
     assert!(store.pending_ops(account_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn search_indexes_headers_and_body() {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    let message_id = store.upsert_message(message(folder_id, 1)).await.unwrap();
+
+    let hits = store.search(&fts_query("subject"), 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message.uid, 1);
+    assert_eq!(
+        store.search(&fts_query("Sender"), 10).await.unwrap().len(),
+        1
+    );
+
+    store
+        .index_body(message_id, "pineapple pizza".to_string())
+        .await
+        .unwrap();
+    let hits = store.search(&fts_query("pineapple"), 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].snippet.contains("pineapple"));
+
+    let mut updated = message(folder_id, 1);
+    updated.subject = "renamed".to_string();
+    store.upsert_message(updated).await.unwrap();
+    assert_eq!(
+        store.search(&fts_query("renamed"), 10).await.unwrap().len(),
+        1
+    );
+    assert_eq!(
+        store
+            .search(&fts_query("pineapple"), 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    store.delete_messages(folder_id, &[1]).await.unwrap();
+    assert!(
+        store
+            .search(&fts_query("pineapple"), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .search(&fts_query("renamed"), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

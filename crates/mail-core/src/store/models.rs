@@ -371,6 +371,12 @@ impl PendingOpRecord {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub message: MessageRecord,
+    pub snippet: String,
+}
+
 fn parse_security(value: &str) -> Result<Security, Error> {
     match value {
         "ssl" => Ok(Security::Ssl),

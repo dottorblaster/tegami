@@ -538,6 +538,13 @@ async fn fetch_body_stores_raw_and_attachments() {
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].filename.as_deref(), Some("doc.pdf"));
     assert_eq!(attachments[0].mime_type.as_deref(), Some("application/pdf"));
+
+    let hits = store
+        .search(&mail_core::store::fts_query("Hello"), 10)
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message.uid, 1);
 }
 
 #[tokio::test]

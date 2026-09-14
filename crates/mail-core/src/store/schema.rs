@@ -10,7 +10,10 @@ use rusqlite::Connection;
 
 use super::StoreError;
 
-const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("migrations/0001_initial.sql"),
+    include_str!("migrations/0002_search.sql"),
+];
 
 pub fn migrate(connection: &mut Connection) -> Result<(), StoreError> {
     let current: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
