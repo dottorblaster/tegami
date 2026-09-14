@@ -38,6 +38,7 @@ pub struct Address {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Envelope {
     pub uid: u32,
+    pub modseq: Option<u64>,
     pub flags: MessageFlags,
     pub size: u32,
     pub subject: String,

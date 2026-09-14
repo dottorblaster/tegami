@@ -6,26 +6,41 @@ use std::time::{Duration, UNIX_EPOCH};
 use mail_core::account::AccountConfig;
 use mail_core::backend::Result;
 use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
-use mail_core::folder::{Folder, FolderRole, FolderState};
+use mail_core::folder::{Folder, FolderDelta, FolderRole, FolderState};
 use mail_core::{Credential, MailBackend, MailError};
 use store::{AccountRecord, AccountSource, AuthKind, Store};
-use sync::{EnvelopeWindow, sync_account};
+use sync::{EnvelopeWindow, sync_account, sync_folder};
 
 struct FakeBackend {
     folders: Vec<(String, Vec<Envelope>)>,
+    vanished: Vec<(String, u32)>,
+    modseq: u64,
+    condstore: bool,
+    qresync: bool,
 }
 
 impl FakeBackend {
     fn new(folders: &[(&str, usize)]) -> Self {
-        Self {
-            folders: folders
-                .iter()
-                .map(|(name, count)| {
-                    let envelopes = (1..=*count).map(|uid| envelope(uid as u32, name)).collect();
-                    (name.to_string(), envelopes)
-                })
-                .collect(),
+        let mut backend = Self {
+            folders: Vec::new(),
+            vanished: Vec::new(),
+            modseq: 0,
+            condstore: true,
+            qresync: true,
+        };
+        for (name, count) in folders {
+            let mut envelopes = Vec::new();
+            for uid in 1..=*count {
+                backend.modseq += 1;
+                envelopes.push(envelope(
+                    uid as u32,
+                    &format!("{name} {uid}"),
+                    backend.modseq,
+                ));
+            }
+            backend.folders.push((name.to_string(), envelopes));
         }
+        backend
     }
 
     fn folder(&self, name: &str) -> Result<&Vec<Envelope>> {
@@ -35,17 +50,63 @@ impl FakeBackend {
             .map(|(_, envelopes)| envelopes)
             .ok_or_else(|| MailError::Protocol(format!("no such folder {name}")))
     }
+
+    fn folder_mut(&mut self, name: &str) -> Option<&mut Vec<Envelope>> {
+        self.folders
+            .iter_mut()
+            .find(|(candidate, _)| candidate == name)
+            .map(|(_, envelopes)| envelopes)
+    }
+
+    fn add_message(&mut self, folder: &str, subject: &str) -> u32 {
+        let uid = self
+            .folder(folder)
+            .map(|envelopes| {
+                envelopes
+                    .iter()
+                    .map(|envelope| envelope.uid)
+                    .max()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0)
+            + 1;
+        self.modseq += 1;
+        let envelope = envelope(uid, subject, self.modseq);
+        self.folder_mut(folder).unwrap().push(envelope);
+        uid
+    }
+
+    fn mark_seen(&mut self, folder: &str, uid: u32) {
+        self.modseq += 1;
+        let modseq = self.modseq;
+        if let Some(target) = self
+            .folder_mut(folder)
+            .and_then(|envelopes| envelopes.iter_mut().find(|envelope| envelope.uid == uid))
+        {
+            target.flags.seen = true;
+            target.modseq = Some(modseq);
+        }
+    }
+
+    fn expunge(&mut self, folder: &str, uid: u32) {
+        self.modseq += 1;
+        if let Some(envelopes) = self.folder_mut(folder) {
+            envelopes.retain(|envelope| envelope.uid != uid);
+        }
+        self.vanished.push((folder.to_string(), uid));
+    }
 }
 
-fn envelope(uid: u32, folder: &str) -> Envelope {
+fn envelope(uid: u32, subject: &str, modseq: u64) -> Envelope {
     Envelope {
         uid,
+        modseq: Some(modseq),
         flags: MessageFlags {
             seen: uid.is_multiple_of(2),
             ..MessageFlags::default()
         },
         size: 100 + uid,
-        subject: format!("{folder} {uid}"),
+        subject: subject.to_string(),
         from: vec![Address {
             name: Some("Sender".to_string()),
             address: Some("sender@example.org".to_string()),
@@ -65,6 +126,14 @@ fn envelope(uid: u32, folder: &str) -> Envelope {
 impl MailBackend for FakeBackend {
     async fn connect(&mut self, _config: &AccountConfig, _credential: &Credential) -> Result<()> {
         Ok(())
+    }
+
+    fn supports_condstore(&self) -> bool {
+        self.condstore
+    }
+
+    fn supports_qresync(&self) -> bool {
+        self.qresync
     }
 
     async fn disconnect(&mut self) -> Result<()> {
@@ -95,6 +164,7 @@ impl MailBackend for FakeBackend {
             exists: count,
             recent: 0,
             unseen: None,
+            highest_modseq: self.condstore.then_some(self.modseq),
         })
     }
 
@@ -117,6 +187,27 @@ impl MailBackend for FakeBackend {
             .collect();
         envelopes.sort_by_key(|envelope| envelope.uid);
         Ok(envelopes)
+    }
+
+    async fn fetch_delta(&mut self, folder: &str, since_modseq: u64) -> Result<FolderDelta> {
+        let changed = self
+            .folder(folder)?
+            .iter()
+            .filter(|envelope| {
+                envelope
+                    .modseq
+                    .map(|modseq| modseq > since_modseq)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        let vanished = self
+            .vanished
+            .iter()
+            .filter(|(name, _)| name == folder)
+            .map(|(_, uid)| *uid)
+            .collect();
+        Ok(FolderDelta { changed, vanished })
     }
 
     async fn fetch_message(&mut self, _folder: &str, _uid: u32) -> Result<Vec<u8>> {
@@ -162,6 +253,25 @@ fn account() -> AccountRecord {
     }
 }
 
+async fn open_store(backend: &mut FakeBackend) -> (Store, i64) {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    sync_account(backend, &store, account_id, EnvelopeWindow::new(10))
+        .await
+        .unwrap();
+    (store, account_id)
+}
+
+async fn folder_record(store: &Store, account_id: i64, name: &str) -> store::FolderRecord {
+    store
+        .folders(account_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|folder| folder.name == name)
+        .unwrap()
+}
+
 #[test]
 fn envelope_window_selects_newest() {
     let window = EnvelopeWindow::new(3);
@@ -181,6 +291,7 @@ async fn initial_sync_persists_window() {
         .await
         .unwrap();
     assert_eq!(reports.len(), 2);
+    assert!(reports.iter().all(|report| !report.incremental));
 
     let folders = store.folders(account_id).await.unwrap();
     let inbox = folders
@@ -188,14 +299,8 @@ async fn initial_sync_persists_window() {
         .find(|folder| folder.name == "INBOX")
         .unwrap();
     assert_eq!(inbox.special_use, Some(store::SpecialUse::Inbox));
+    assert!(inbox.highestmodseq.is_some());
     let inbox_id = inbox.id.unwrap();
-
-    let inbox_report = reports
-        .iter()
-        .find(|report| report.folder_id == inbox_id)
-        .unwrap();
-    assert_eq!(inbox_report.total, 5);
-    assert_eq!(inbox_report.fetched, 2);
 
     let messages = store.messages(inbox_id).await.unwrap();
     assert_eq!(messages.len(), 2);
@@ -209,6 +314,7 @@ async fn initial_sync_persists_window() {
     );
     assert_eq!(messages[1].size, Some(105));
     assert_eq!(messages[1].date_recv, Some(1_700_000_005));
+    assert_eq!(messages[1].modseq, Some(5));
     assert_eq!(messages[0].flags & store::FLAG_SEEN, store::FLAG_SEEN);
     assert_eq!(messages[1].flags & store::FLAG_SEEN, 0);
 
@@ -216,12 +322,91 @@ async fn initial_sync_persists_window() {
         .iter()
         .find(|folder| folder.name == "Archive")
         .unwrap();
-    let archive_id = archive.id.unwrap();
-    let archive_report = reports
-        .iter()
-        .find(|report| report.folder_id == archive_id)
+    assert_eq!(store.messages(archive.id.unwrap()).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn incremental_sync_applies_delta_and_vanished() {
+    let mut backend = FakeBackend::new(&[("INBOX", 3)]);
+    let (store, account_id) = open_store(&mut backend).await;
+    let inbox_id = folder_record(&store, account_id, "INBOX").await.id.unwrap();
+    assert_eq!(store.message_uids(inbox_id).await.unwrap(), vec![1, 2, 3]);
+
+    let new_uid = backend.add_message("INBOX", "brand new");
+    backend.mark_seen("INBOX", 1);
+    backend.expunge("INBOX", 2);
+
+    let folder = folder_record(&store, account_id, "INBOX").await;
+    let report = sync_folder(&mut backend, &store, &folder, EnvelopeWindow::new(10))
+        .await
         .unwrap();
-    assert_eq!(archive_report.total, 1);
-    assert_eq!(archive_report.fetched, 1);
-    assert_eq!(store.messages(archive_id).await.unwrap().len(), 1);
+    assert!(report.incremental);
+    assert_eq!(report.changed, 2);
+    assert_eq!(report.vanished, 1);
+
+    assert_eq!(
+        store.message_uids(inbox_id).await.unwrap(),
+        vec![1, 3, new_uid]
+    );
+    assert!(store.message(inbox_id, 1).await.unwrap().unwrap().flags & store::FLAG_SEEN != 0);
+    assert!(store.message(inbox_id, 2).await.unwrap().is_none());
+    assert_eq!(
+        store
+            .message(inbox_id, new_uid)
+            .await
+            .unwrap()
+            .unwrap()
+            .subject,
+        "brand new"
+    );
+}
+
+#[tokio::test]
+async fn condstore_without_qresync_rescans_vanished() {
+    let mut backend = FakeBackend::new(&[("INBOX", 3)]);
+    backend.qresync = false;
+    let (store, account_id) = open_store(&mut backend).await;
+    let inbox_id = folder_record(&store, account_id, "INBOX").await.id.unwrap();
+
+    backend.mark_seen("INBOX", 3);
+    backend.expunge("INBOX", 1);
+
+    let folder = folder_record(&store, account_id, "INBOX").await;
+    let report = sync_folder(&mut backend, &store, &folder, EnvelopeWindow::new(10))
+        .await
+        .unwrap();
+    assert!(report.incremental);
+    assert_eq!(report.changed, 1);
+    assert_eq!(report.vanished, 1);
+    assert_eq!(store.message_uids(inbox_id).await.unwrap(), vec![2, 3]);
+}
+
+#[tokio::test]
+async fn without_condstore_uses_uid_rescan() {
+    let mut backend = FakeBackend::new(&[("INBOX", 3)]);
+    backend.condstore = false;
+    backend.qresync = false;
+    let (store, account_id) = open_store(&mut backend).await;
+    let inbox_id = folder_record(&store, account_id, "INBOX").await.id.unwrap();
+    assert_eq!(
+        folder_record(&store, account_id, "INBOX")
+            .await
+            .highestmodseq,
+        None
+    );
+
+    let new_uid = backend.add_message("INBOX", "fresh");
+    backend.expunge("INBOX", 2);
+
+    let folder = folder_record(&store, account_id, "INBOX").await;
+    let report = sync_folder(&mut backend, &store, &folder, EnvelopeWindow::new(10))
+        .await
+        .unwrap();
+    assert!(!report.incremental);
+    assert_eq!(report.changed, 1);
+    assert_eq!(report.vanished, 1);
+    assert_eq!(
+        store.message_uids(inbox_id).await.unwrap(),
+        vec![1, 3, new_uid]
+    );
 }

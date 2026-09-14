@@ -16,7 +16,7 @@ use tokio::net::TcpStream;
 use mail_core::account::AccountConfig;
 use mail_core::backend::Result;
 use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
-use mail_core::{Credential, Folder, FolderRole, FolderState, MailBackend, MailError};
+use mail_core::{Credential, Folder, FolderDelta, FolderRole, FolderState, MailBackend, MailError};
 
 use crate::auth::Xoauth2;
 
@@ -47,6 +47,8 @@ pub struct ImapBackend {
     session: Option<Session<Stream>>,
     supports_idle: bool,
     supports_move: bool,
+    supports_condstore: bool,
+    supports_qresync: bool,
 }
 
 impl ImapBackend {
@@ -55,11 +57,24 @@ impl ImapBackend {
             session: None,
             supports_idle: false,
             supports_move: false,
+            supports_condstore: false,
+            supports_qresync: false,
         }
     }
 
     fn session(&mut self) -> Result<&mut Session<Stream>> {
         self.session.as_mut().ok_or(MailError::Disconnected)
+    }
+
+    async fn select_mailbox(&mut self, folder: &str) -> Result<async_imap::types::Mailbox> {
+        let supports_condstore = self.supports_condstore;
+        let folder = folder.to_string();
+        let session = self.session()?;
+        if supports_condstore {
+            session.select_condstore(folder).await.map_err(map_err)
+        } else {
+            session.select(folder).await.map_err(map_err)
+        }
     }
 }
 
@@ -119,12 +134,28 @@ impl MailBackend for ImapBackend {
                 .map_err(|(err, _)| MailError::Protocol(err.to_string()))?,
         };
         let capabilities = session.capabilities().await.map_err(map_err)?;
-        self.supports_idle =
-            capabilities.has(&async_imap::types::Capability::Atom("IDLE".to_string()));
-        self.supports_move =
-            capabilities.has(&async_imap::types::Capability::Atom("MOVE".to_string()));
+        let has =
+            |name: &str| capabilities.has(&async_imap::types::Capability::Atom(name.to_string()));
+        self.supports_idle = has("IDLE");
+        self.supports_move = has("MOVE");
+        self.supports_condstore = has("CONDSTORE");
+        self.supports_qresync = has("QRESYNC");
+        if self.supports_qresync {
+            session
+                .run_command_and_check_ok("ENABLE QRESYNC")
+                .await
+                .map_err(map_err)?;
+        }
         self.session = Some(session);
         Ok(())
+    }
+
+    fn supports_condstore(&self) -> bool {
+        self.supports_condstore
+    }
+
+    fn supports_qresync(&self) -> bool {
+        self.supports_qresync
     }
 
     async fn disconnect(&mut self) -> Result<()> {
@@ -159,21 +190,20 @@ impl MailBackend for ImapBackend {
     }
 
     async fn select(&mut self, folder: &str) -> Result<FolderState> {
-        let folder = folder.to_string();
-        let mailboxes = self.session()?.select(folder).await.map_err(map_err)?;
+        let mailboxes = self.select_mailbox(folder).await?;
         Ok(FolderState {
             uid_validity: mailboxes.uid_validity.unwrap_or(0),
             uid_next: mailboxes.uid_next.unwrap_or(0),
             exists: mailboxes.exists,
             recent: mailboxes.recent,
             unseen: mailboxes.unseen,
+            highest_modseq: mailboxes.highest_modseq,
         })
     }
 
     async fn uids(&mut self, folder: &str) -> Result<Vec<u32>> {
-        let folder = folder.to_string();
+        self.select_mailbox(folder).await?;
         let session = self.session()?;
-        session.select(&folder).await.map_err(map_err)?;
         let mut uids: Vec<u32> = session
             .uid_search("ALL")
             .await
@@ -188,14 +218,16 @@ impl MailBackend for ImapBackend {
         if uids.is_empty() {
             return Ok(Vec::new());
         }
-        let folder = folder.to_string();
+        let supports_condstore = self.supports_condstore;
         let id_set = uid_set(uids);
+        let query = if supports_condstore {
+            "(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE MODSEQ)"
+        } else {
+            "(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE)"
+        };
+        self.select_mailbox(folder).await?;
         let session = self.session()?;
-        session.select(&folder).await.map_err(map_err)?;
-        let messages = session
-            .uid_fetch(id_set, "(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE)")
-            .await
-            .map_err(map_err)?;
+        let messages = session.uid_fetch(id_set, query).await.map_err(map_err)?;
         let mut envelopes = Vec::new();
         futures_util::pin_mut!(messages);
         while let Some(message) = messages.next().await {
@@ -203,6 +235,34 @@ impl MailBackend for ImapBackend {
         }
         envelopes.sort_by_key(|envelope| envelope.uid);
         Ok(envelopes)
+    }
+
+    async fn fetch_delta(&mut self, folder: &str, since_modseq: u64) -> Result<FolderDelta> {
+        let query = delta_query(since_modseq, self.supports_qresync);
+        self.select_mailbox(folder).await?;
+        let session = self.session()?;
+        let mut changed = Vec::new();
+        {
+            let messages = session.uid_fetch("1:*", query).await.map_err(map_err)?;
+            futures_util::pin_mut!(messages);
+            while let Some(message) = messages.next().await {
+                changed.push(to_envelope(message.map_err(map_err)?));
+            }
+        }
+        let mut vanished = Vec::new();
+        while let Ok(response) = session.unsolicited_responses.try_recv() {
+            if let async_imap::types::UnsolicitedResponse::Other(data) = response
+                && let async_imap::imap_proto::Response::Vanished { uids, .. } = data.parsed()
+            {
+                for range in uids {
+                    vanished.extend(range.clone());
+                }
+            }
+        }
+        changed.sort_by_key(|envelope| envelope.uid);
+        vanished.sort_unstable();
+        vanished.dedup();
+        Ok(FolderDelta { changed, vanished })
     }
 
     async fn fetch_message(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
@@ -333,6 +393,15 @@ impl MailBackend for ImapBackend {
     }
 }
 
+fn delta_query(since_modseq: u64, qresync: bool) -> String {
+    let modifier = if qresync {
+        format!("(CHANGEDSINCE {since_modseq} VANISHED)")
+    } else {
+        format!("(CHANGEDSINCE {since_modseq})")
+    };
+    format!("(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE MODSEQ) {modifier}")
+}
+
 fn display_name(path: &str) -> String {
     Path::new(path)
         .file_name()
@@ -379,6 +448,7 @@ fn to_envelope(fetch: async_imap::types::Fetch) -> Envelope {
     };
     Envelope {
         uid: fetch.uid.unwrap_or(0),
+        modseq: fetch.modseq,
         flags: flags(&fetch),
         size: fetch.size.unwrap_or(0),
         subject,
@@ -512,7 +582,7 @@ fn append_flags(flags: MessageFlags) -> String {
 mod tests {
     use mail_core::envelope::{FlagChange, MessageFlags};
 
-    use super::{append_flags, display_name, folder_role, uid_set};
+    use super::{append_flags, delta_query, display_name, folder_role, uid_set};
 
     #[test]
     fn uid_set_compresses_ranges() {
@@ -563,6 +633,18 @@ mod tests {
         assert_eq!(display_name("INBOX"), "INBOX");
         assert_eq!(display_name("[Gmail]/Sent Mail"), "Sent Mail");
         assert_eq!(display_name("INBOX/Archive"), "Archive");
+    }
+
+    #[test]
+    fn delta_query_requests_vanished_only_with_qresync() {
+        assert_eq!(
+            delta_query(42, false),
+            "(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE MODSEQ) (CHANGEDSINCE 42)"
+        );
+        assert_eq!(
+            delta_query(42, true),
+            "(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE MODSEQ) (CHANGEDSINCE 42 VANISHED)"
+        );
     }
 
     #[test]

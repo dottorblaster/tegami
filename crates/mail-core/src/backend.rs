@@ -13,7 +13,7 @@ use std::future::Future;
 
 use crate::account::AccountConfig;
 use crate::envelope::{Envelope, FlagChange, MessageFlags};
-use crate::folder::{Folder, FolderState};
+use crate::folder::{Folder, FolderDelta, FolderState};
 
 /// Untyped error surfaced by a [`MailBackend`].
 #[derive(Debug)]
@@ -73,6 +73,10 @@ pub trait MailBackend {
     /// Terminates the session gracefully.
     fn disconnect(&mut self) -> impl Future<Output = Result<()>> + Send;
 
+    fn supports_condstore(&self) -> bool;
+
+    fn supports_qresync(&self) -> bool;
+
     /// Lists the folders of the account with their SPECIAL-USE roles.
     fn folders(&mut self) -> impl Future<Output = Result<Vec<Folder>>> + Send;
 
@@ -86,6 +90,12 @@ pub trait MailBackend {
         folder: &str,
         uids: &[u32],
     ) -> impl Future<Output = Result<Vec<Envelope>>> + Send;
+
+    fn fetch_delta(
+        &mut self,
+        folder: &str,
+        since_modseq: u64,
+    ) -> impl Future<Output = Result<FolderDelta>> + Send;
 
     /// Fetches the raw MIME body of a message, identified by its UID.
     fn fetch_message(

@@ -15,4 +15,4 @@ pub mod folder;
 
 pub use backend::{Credential, MailBackend, MailError};
 pub use envelope::{Address, Envelope, FlagChange, MessageFlags};
-pub use folder::{Folder, FolderRole, FolderState};
+pub use folder::{Folder, FolderDelta, FolderRole, FolderState};

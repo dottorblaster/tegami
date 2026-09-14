@@ -3,9 +3,11 @@
 
 mod message;
 
+use std::collections::HashSet;
+
 use mail_core::MailBackend;
 use mail_core::backend::MailError;
-use store::{Store, StoreError};
+use store::{FolderRecord, MessageRecord, Store, StoreError};
 
 pub use message::message_record;
 
@@ -75,30 +77,86 @@ impl Default for EnvelopeWindow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderSync {
     pub folder_id: i64,
-    pub total: usize,
-    pub fetched: usize,
+    pub incremental: bool,
+    pub changed: usize,
+    pub vanished: usize,
 }
 
 pub async fn sync_folder<B: MailBackend + ?Sized>(
     backend: &mut B,
     store: &Store,
-    folder_id: i64,
-    folder: &str,
+    folder: &FolderRecord,
     window: EnvelopeWindow,
 ) -> Result<FolderSync> {
-    let uids = backend.uids(folder).await?;
-    let selected = window.select(&uids);
-    let envelopes = backend.fetch_envelopes(folder, selected).await?;
-    let records = envelopes
+    let folder_id = folder
+        .id
+        .ok_or_else(|| SyncError::MissingFolderId(folder.name.clone()))?;
+    let state = backend.select(&folder.name).await?;
+    store.set_folder_state(folder_id, state).await?;
+
+    let previous_modseq = folder
+        .highestmodseq
+        .filter(|_| backend.supports_condstore())
+        .map(|modseq| modseq as u64);
+
+    let (changed, vanished, incremental) = match previous_modseq {
+        Some(modseq) => {
+            let delta = backend.fetch_delta(&folder.name, modseq).await?;
+            let vanished = if backend.supports_qresync() {
+                delta.vanished
+            } else {
+                missing_uids(backend, store, folder_id, &folder.name).await?
+            };
+            (delta.changed, vanished, true)
+        }
+        None => {
+            let uids = backend.uids(&folder.name).await?;
+            let stored = store.message_uids(folder_id).await?;
+            let known: HashSet<u32> = stored.iter().copied().collect();
+            let current: HashSet<u32> = uids.iter().copied().collect();
+            let vanished: Vec<u32> = stored
+                .iter()
+                .copied()
+                .filter(|uid| !current.contains(uid))
+                .collect();
+            let new: Vec<u32> = window
+                .select(&uids)
+                .iter()
+                .copied()
+                .filter(|uid| !known.contains(uid))
+                .collect();
+            let envelopes = backend.fetch_envelopes(&folder.name, &new).await?;
+            (envelopes, vanished, false)
+        }
+    };
+
+    let records: Vec<MessageRecord> = changed
         .iter()
         .map(|envelope| message_record(folder_id, envelope))
         .collect();
+    let changed_count = records.len();
     store.upsert_messages(records).await?;
+    store.delete_messages(folder_id, &vanished).await?;
     Ok(FolderSync {
         folder_id,
-        total: uids.len(),
-        fetched: selected.len(),
+        incremental,
+        changed: changed_count,
+        vanished: vanished.len(),
     })
+}
+
+async fn missing_uids<B: MailBackend + ?Sized>(
+    backend: &mut B,
+    store: &Store,
+    folder_id: i64,
+    folder: &str,
+) -> Result<Vec<u32>> {
+    let stored = store.message_uids(folder_id).await?;
+    let current: HashSet<u32> = backend.uids(folder).await?.into_iter().collect();
+    Ok(stored
+        .into_iter()
+        .filter(|uid| !current.contains(uid))
+        .collect())
 }
 
 pub async fn sync_account<B: MailBackend + ?Sized>(
@@ -111,10 +169,7 @@ pub async fn sync_account<B: MailBackend + ?Sized>(
     let stored = store.sync_folders(account_id, &folders).await?;
     let mut reports = Vec::with_capacity(stored.len());
     for folder in &stored {
-        let folder_id = folder
-            .id
-            .ok_or_else(|| SyncError::MissingFolderId(folder.name.clone()))?;
-        reports.push(sync_folder(backend, store, folder_id, &folder.name, window).await?);
+        reports.push(sync_folder(backend, store, folder, window).await?);
     }
     Ok(reports)
 }

@@ -247,3 +247,42 @@ async fn set_message_flags_updates_subset() {
 
     store.set_message_flags(folder_id, &[], 0).await.unwrap();
 }
+
+#[tokio::test]
+async fn folder_state_and_message_deletion() {
+    use mail_core::folder::FolderState;
+
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    for uid in 1..=3 {
+        store.upsert_message(message(folder_id, uid)).await.unwrap();
+    }
+
+    store
+        .set_folder_state(
+            folder_id,
+            FolderState {
+                uid_validity: 7,
+                uid_next: 10,
+                exists: 3,
+                recent: 0,
+                unseen: Some(2),
+                highest_modseq: Some(1234),
+            },
+        )
+        .await
+        .unwrap();
+
+    let folders = store.folders(account_id).await.unwrap();
+    assert_eq!(folders[0].uidvalidity, Some(7));
+    assert_eq!(folders[0].uidnext, Some(10));
+    assert_eq!(folders[0].highestmodseq, Some(1234));
+    assert_eq!(folders[0].unread_count, 2);
+    assert_eq!(folders[0].total_count, 3);
+
+    assert_eq!(store.message_uids(folder_id).await.unwrap(), vec![1, 2, 3]);
+    store.delete_messages(folder_id, &[1, 3]).await.unwrap();
+    assert_eq!(store.message_uids(folder_id).await.unwrap(), vec![2]);
+    store.delete_messages(folder_id, &[]).await.unwrap();
+}

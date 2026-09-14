@@ -3,6 +3,8 @@
 
 //! Mail folder model.
 
+use crate::envelope::Envelope;
+
 /// The SPECIAL-USE role of a folder, when the server or the discovery
 /// layer can map it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,4 +37,11 @@ pub struct FolderState {
     pub exists: u32,
     pub recent: u32,
     pub unseen: Option<u32>,
+    pub highest_modseq: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FolderDelta {
+    pub changed: Vec<Envelope>,
+    pub vanished: Vec<u32>,
 }

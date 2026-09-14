@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use mail_core::folder::Folder;
+use mail_core::folder::{Folder, FolderState};
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -42,6 +42,20 @@ enum Command {
         account_id: i64,
         folders: Vec<Folder>,
         reply: oneshot::Sender<StoreResult<Vec<FolderRecord>>>,
+    },
+    SetFolderState {
+        folder_id: i64,
+        state: FolderState,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    MessageUids {
+        folder_id: i64,
+        reply: oneshot::Sender<StoreResult<Vec<u32>>>,
+    },
+    DeleteMessages {
+        folder_id: i64,
+        uids: Vec<u32>,
+        reply: oneshot::Sender<StoreResult<()>>,
     },
     Messages {
         folder_id: i64,
@@ -143,6 +157,34 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn set_folder_state(&self, folder_id: i64, state: FolderState) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::SetFolderState {
+            folder_id,
+            state,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn message_uids(&self, folder_id: i64) -> StoreResult<Vec<u32>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::MessageUids { folder_id, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn delete_messages(&self, folder_id: i64, uids: &[u32]) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::DeleteMessages {
+            folder_id,
+            uids: uids.to_vec(),
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn messages(&self, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::Messages { folder_id, reply }).await?;
@@ -230,6 +272,19 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
                 folders,
                 reply,
             } => reply_send(reply, sync_folders(&mut connection, account_id, &folders)),
+            Command::SetFolderState {
+                folder_id,
+                state,
+                reply,
+            } => reply_send(reply, set_folder_state(&connection, folder_id, &state)),
+            Command::MessageUids { folder_id, reply } => {
+                reply_send(reply, message_uids(&connection, folder_id))
+            }
+            Command::DeleteMessages {
+                folder_id,
+                uids,
+                reply,
+            } => reply_send(reply, delete_messages(&connection, folder_id, &uids)),
             Command::Messages { folder_id, reply } => {
                 reply_send(reply, messages(&connection, folder_id))
             }
@@ -396,6 +451,51 @@ fn delete_missing_folders(
     params.push(&account_id);
     for folder in discovered {
         params.push(&folder.id);
+    }
+    connection.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+    Ok(())
+}
+
+fn set_folder_state(
+    connection: &Connection,
+    folder_id: i64,
+    state: &FolderState,
+) -> StoreResult<()> {
+    connection.execute(
+        "UPDATE folder SET uidvalidity = ?1, uidnext = ?2, highestmodseq = ?3, unread_count = ?4, total_count = ?5 WHERE id = ?6",
+        rusqlite::params![
+            i64::from(state.uid_validity),
+            i64::from(state.uid_next),
+            state
+                .highest_modseq
+                .and_then(|modseq| i64::try_from(modseq).ok()),
+            i64::from(state.unseen.unwrap_or(0)),
+            i64::from(state.exists),
+            folder_id,
+        ],
+    )?;
+    Ok(())
+}
+
+fn message_uids(connection: &Connection, folder_id: i64) -> StoreResult<Vec<u32>> {
+    let mut statement =
+        connection.prepare("SELECT uid FROM message WHERE folder_id = ?1 ORDER BY uid")?;
+    let rows = statement
+        .query_map([folder_id], |row| row.get::<_, u32>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn delete_messages(connection: &Connection, folder_id: i64, uids: &[u32]) -> StoreResult<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("DELETE FROM message WHERE folder_id = ?1 AND uid IN ({placeholders})");
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(uids.len() + 1);
+    params.push(&folder_id);
+    for uid in uids {
+        params.push(uid);
     }
     connection.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
     Ok(())

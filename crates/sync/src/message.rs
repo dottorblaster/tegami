@@ -16,7 +16,9 @@ pub fn message_record(folder_id: i64, envelope: &Envelope) -> MessageRecord {
         id: None,
         folder_id,
         uid: envelope.uid,
-        modseq: None,
+        modseq: envelope
+            .modseq
+            .and_then(|modseq| i64::try_from(modseq).ok()),
         message_id: envelope.message_id.clone(),
         thread_id: None,
         subject: envelope.subject.clone(),
@@ -90,6 +92,7 @@ mod tests {
     fn envelope() -> Envelope {
         Envelope {
             uid: 7,
+            modseq: Some(99),
             flags: MessageFlags {
                 seen: true,
                 ..MessageFlags::default()
@@ -124,6 +127,7 @@ mod tests {
         assert_eq!(record.cc_addrs, None);
         assert_eq!(record.date_recv, Some(1_700_000_000));
         assert_eq!(record.size, Some(1234));
+        assert_eq!(record.modseq, Some(99));
         assert_eq!(record.message_id.as_deref(), Some("<7@example.org>"));
         assert_eq!(record.in_reply_to.as_deref(), Some("<6@example.org>"));
         assert_eq!(

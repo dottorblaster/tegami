@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use mail_core::account::AccountConfig;
 use mail_core::backend::Result;
 use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
-use mail_core::folder::{Folder, FolderRole, FolderState};
+use mail_core::folder::{Folder, FolderDelta, FolderRole, FolderState};
 use mail_core::{Credential, MailBackend, MailError};
 
 struct FakeMessage {
@@ -61,6 +61,7 @@ impl FakeBackend {
             FakeMessage {
                 envelope: Envelope {
                     uid,
+                    modseq: None,
                     flags: MessageFlags::default(),
                     size: raw.len() as u32,
                     subject: subject.to_string(),
@@ -99,6 +100,14 @@ impl MailBackend for FakeBackend {
         Ok(())
     }
 
+    fn supports_condstore(&self) -> bool {
+        false
+    }
+
+    fn supports_qresync(&self) -> bool {
+        false
+    }
+
     async fn folders(&mut self) -> Result<Vec<Folder>> {
         let mut folders: Vec<Folder> = self
             .folders
@@ -131,6 +140,7 @@ impl MailBackend for FakeBackend {
             exists: folder.messages.len() as u32,
             recent: 0,
             unseen: None,
+            highest_modseq: None,
         })
     }
 
@@ -156,6 +166,10 @@ impl MailBackend for FakeBackend {
             .collect();
         envelopes.sort_by_key(|envelope| envelope.uid);
         Ok(envelopes)
+    }
+
+    async fn fetch_delta(&mut self, _folder: &str, _since_modseq: u64) -> Result<FolderDelta> {
+        Err(MailError::Protocol("CONDSTORE not supported".to_string()))
     }
 
     async fn fetch_message(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
@@ -237,6 +251,7 @@ impl MailBackend for FakeBackend {
             FakeMessage {
                 envelope: Envelope {
                     uid,
+                    modseq: None,
                     flags,
                     size: raw.len() as u32,
                     subject: String::new(),
