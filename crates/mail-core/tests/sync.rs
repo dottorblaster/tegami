@@ -8,7 +8,10 @@ use mail_core::backend::Result;
 use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
 use mail_core::folder::{Folder, FolderDelta, FolderRole, FolderState};
 use mail_core::store::{AccountRecord, AccountSource, AuthKind, Store};
-use mail_core::sync::{EnvelopeWindow, fetch_body, sync_account, sync_folder};
+use mail_core::sync::{
+    EnvelopeWindow, fetch_body, queue_delete, queue_move, queue_set_flags, replay_pending,
+    sync_account, sync_folder,
+};
 use mail_core::{Credential, MailBackend, MailError};
 use tempfile::TempDir;
 
@@ -16,6 +19,8 @@ struct FakeBackend {
     folders: Vec<(String, Vec<Envelope>)>,
     bodies: Vec<((String, u32), Vec<u8>)>,
     vanished: Vec<(String, u32)>,
+    flag_calls: Vec<(String, Vec<u32>, FlagChange)>,
+    move_calls: Vec<(String, String, Vec<u32>)>,
     modseq: u64,
     uid_validity: u32,
     condstore: bool,
@@ -28,6 +33,8 @@ impl FakeBackend {
             folders: Vec::new(),
             bodies: Vec::new(),
             vanished: Vec::new(),
+            flag_calls: Vec::new(),
+            move_calls: Vec::new(),
             modseq: 0,
             uid_validity: 1,
             condstore: true,
@@ -247,11 +254,15 @@ impl MailBackend for FakeBackend {
             .ok_or_else(|| MailError::Protocol(format!("no body {uid} in {folder}")))
     }
 
-    async fn set_flags(&mut self, _folder: &str, _uids: &[u32], _change: FlagChange) -> Result<()> {
+    async fn set_flags(&mut self, folder: &str, uids: &[u32], change: FlagChange) -> Result<()> {
+        self.flag_calls
+            .push((folder.to_string(), uids.to_vec(), change));
         Ok(())
     }
 
-    async fn move_messages(&mut self, _from: &str, _to: &str, _uids: &[u32]) -> Result<()> {
+    async fn move_messages(&mut self, from: &str, to: &str, uids: &[u32]) -> Result<()> {
+        self.move_calls
+            .push((from.to_string(), to.to_string(), uids.to_vec()));
         Ok(())
     }
 
@@ -527,4 +538,71 @@ async fn fetch_body_stores_raw_and_attachments() {
     assert_eq!(attachments.len(), 1);
     assert_eq!(attachments[0].filename.as_deref(), Some("doc.pdf"));
     assert_eq!(attachments[0].mime_type.as_deref(), Some("application/pdf"));
+}
+
+#[tokio::test]
+async fn pending_ops_replay_and_drain() {
+    let mut backend = FakeBackend::new(&[("INBOX", 2), ("Archive", 1)]);
+    let (store, account_id) = open_store(&mut backend).await;
+    let folders = store.folders(account_id).await.unwrap();
+    let inbox_id = folders
+        .iter()
+        .find(|folder| folder.name == "INBOX")
+        .unwrap()
+        .id
+        .unwrap();
+    let archive_id = folders
+        .iter()
+        .find(|folder| folder.name == "Archive")
+        .unwrap()
+        .id
+        .unwrap();
+
+    queue_set_flags(
+        &store,
+        account_id,
+        inbox_id,
+        1,
+        FlagChange {
+            seen: Some(true),
+            ..FlagChange::default()
+        },
+    )
+    .await
+    .unwrap();
+    queue_move(&store, account_id, inbox_id, 2, archive_id)
+        .await
+        .unwrap();
+    queue_delete(&store, account_id, inbox_id, 1).await.unwrap();
+    assert_eq!(store.pending_ops(account_id).await.unwrap().len(), 3);
+
+    let report = replay_pending(&mut backend, &store, account_id)
+        .await
+        .unwrap();
+    assert_eq!(report.replayed, 3);
+    assert_eq!(report.dropped, 0);
+    assert!(store.pending_ops(account_id).await.unwrap().is_empty());
+
+    assert_eq!(backend.flag_calls.len(), 2);
+    assert_eq!(backend.flag_calls[0].0, "INBOX");
+    assert_eq!(backend.flag_calls[0].1, vec![1]);
+    assert_eq!(backend.flag_calls[0].2.seen, Some(true));
+    assert_eq!(backend.flag_calls[1].2.deleted, Some(true));
+    assert_eq!(backend.move_calls.len(), 1);
+    assert_eq!(backend.move_calls[0].1, "Archive");
+    assert_eq!(backend.move_calls[0].2, vec![2]);
+}
+
+#[tokio::test]
+async fn pending_ops_drop_unresolvable_folder() {
+    let mut backend = FakeBackend::new(&[("INBOX", 1)]);
+    let (store, account_id) = open_store(&mut backend).await;
+
+    queue_delete(&store, account_id, 9999, 1).await.unwrap();
+    let report = replay_pending(&mut backend, &store, account_id)
+        .await
+        .unwrap();
+    assert_eq!(report.replayed, 0);
+    assert_eq!(report.dropped, 1);
+    assert!(store.pending_ops(account_id).await.unwrap().is_empty());
 }

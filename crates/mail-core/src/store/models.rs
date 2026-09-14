@@ -180,6 +180,8 @@ pub const FOLDER_COLUMNS: &str = "id, account_id, name, display_name, special_us
 pub const MESSAGE_COLUMNS: &str = "id, folder_id, uid, modseq, message_id, thread_id, subject, from_addr, from_name, to_addrs, cc_addrs, date_sent, date_recv, in_reply_to, refs, flags, has_attach, size, structure, raw_path, body_state";
 pub const ATTACHMENT_COLUMNS: &str =
     "id, message_id, part_id, filename, mime_type, size, content_id, disk_path";
+pub const PENDING_OP_COLUMNS: &str =
+    "id, account_id, op_kind, folder_id, target_folder_id, uid, payload, created_at";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderRecord {
@@ -315,6 +317,56 @@ impl AttachmentRecord {
             size: row.get(5)?,
             content_id: row.get(6)?,
             disk_path: row.get(7)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    SetFlags,
+    Move,
+    Delete,
+}
+
+impl OpKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SetFlags => "set_flags",
+            Self::Move => "move",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOpRecord {
+    pub id: Option<i64>,
+    pub account_id: i64,
+    pub kind: OpKind,
+    pub folder_id: Option<i64>,
+    pub target_folder_id: Option<i64>,
+    pub uid: Option<u32>,
+    pub payload: Option<String>,
+    pub created_at: Option<i64>,
+}
+
+impl PendingOpRecord {
+    pub fn from_row(row: &Row<'_>) -> Result<Self, Error> {
+        let kind: String = row.get(2)?;
+        Ok(Self {
+            id: Some(row.get(0)?),
+            account_id: row.get(1)?,
+            kind: match kind.as_str() {
+                "set_flags" => OpKind::SetFlags,
+                "move" => OpKind::Move,
+                "delete" => OpKind::Delete,
+                other => return Err(bad_enum(2, other)),
+            },
+            folder_id: row.get(3)?,
+            target_folder_id: row.get(4)?,
+            uid: row.get(5)?,
+            payload: row.get(6)?,
+            created_at: row.get(7)?,
         })
     }
 }

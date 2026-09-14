@@ -4,6 +4,7 @@
 mod body;
 mod idle;
 mod message;
+mod ops;
 
 use std::collections::HashSet;
 
@@ -14,12 +15,17 @@ use crate::store::{FolderRecord, MessageRecord, Store, StoreError};
 pub use body::{BodyFetch, fetch_body};
 pub use idle::{IdleEvent, IdleWorker};
 pub use message::message_record;
+pub use ops::{
+    ReplayReport, decode_flag_change, encode_flag_change, queue_delete, queue_move,
+    queue_set_flags, replay_pending,
+};
 
 #[derive(Debug)]
 pub enum SyncError {
     Backend(MailError),
     Store(StoreError),
     Io(std::io::Error),
+    Protocol(String),
     MissingFolderId(String),
     MissingMessage(i64, u32),
 }
@@ -30,6 +36,7 @@ impl std::fmt::Display for SyncError {
             Self::Backend(err) => write!(f, "sync backend error: {err}"),
             Self::Store(err) => write!(f, "sync store error: {err}"),
             Self::Io(err) => write!(f, "sync i/o error: {err}"),
+            Self::Protocol(detail) => write!(f, "sync protocol error: {detail}"),
             Self::MissingFolderId(name) => write!(f, "folder {name} has no store id"),
             Self::MissingMessage(folder_id, uid) => {
                 write!(f, "no message {uid} in folder {folder_id}")
@@ -44,7 +51,7 @@ impl std::error::Error for SyncError {
             Self::Backend(err) => Some(err),
             Self::Store(err) => Some(err),
             Self::Io(err) => Some(err),
-            Self::MissingFolderId(_) | Self::MissingMessage(_, _) => None,
+            Self::MissingFolderId(_) | Self::MissingMessage(_, _) | Self::Protocol(_) => None,
         }
     }
 }

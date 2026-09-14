@@ -3,7 +3,8 @@
 
 use mail_core::store::{
     AccountRecord, AccountSource, AttachmentRecord, AuthKind, BodyState, FLAG_FLAGGED, FLAG_SEEN,
-    FolderRecord, MessageRecord, Security, SpecialUse, Store, bits_to_flags, flags_to_bits,
+    FolderRecord, MessageRecord, OpKind, PendingOpRecord, Security, SpecialUse, Store,
+    bits_to_flags, flags_to_bits,
 };
 use tempfile::TempDir;
 
@@ -341,4 +342,37 @@ async fn stores_message_body_and_attachments() {
         .await
         .unwrap();
     assert!(store.attachments(message_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pending_ops_round_trip() {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+
+    let id = store
+        .enqueue_op(PendingOpRecord {
+            id: None,
+            account_id,
+            kind: OpKind::SetFlags,
+            folder_id: Some(folder_id),
+            target_folder_id: None,
+            uid: Some(7),
+            payload: Some("+.-.".to_string()),
+            created_at: None,
+        })
+        .await
+        .unwrap();
+    assert!(id > 0);
+
+    let pending = store.pending_ops(account_id).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].kind, OpKind::SetFlags);
+    assert_eq!(pending[0].folder_id, Some(folder_id));
+    assert_eq!(pending[0].uid, Some(7));
+    assert_eq!(pending[0].payload.as_deref(), Some("+.-."));
+    assert!(pending[0].created_at.is_some());
+
+    store.delete_op(id).await.unwrap();
+    assert!(store.pending_ops(account_id).await.unwrap().is_empty());
 }

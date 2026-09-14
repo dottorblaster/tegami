@@ -16,7 +16,8 @@ use tokio::sync::{mpsc, oneshot};
 use super::error::{StoreError, StoreResult};
 use super::models::{
     ACCOUNT_COLUMNS, ATTACHMENT_COLUMNS, AccountRecord, AttachmentRecord, BodyState,
-    FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord,
+    FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord, PENDING_OP_COLUMNS,
+    PendingOpRecord,
 };
 use super::schema;
 
@@ -95,6 +96,18 @@ enum Command {
     Attachments {
         message_id: i64,
         reply: oneshot::Sender<StoreResult<Vec<AttachmentRecord>>>,
+    },
+    EnqueueOp {
+        op: PendingOpRecord,
+        reply: oneshot::Sender<StoreResult<i64>>,
+    },
+    PendingOps {
+        account_id: i64,
+        reply: oneshot::Sender<StoreResult<Vec<PendingOpRecord>>>,
+    },
+    DeleteOp {
+        id: i64,
+        reply: oneshot::Sender<StoreResult<()>>,
     },
     SetMessageFlags {
         folder_id: i64,
@@ -257,6 +270,24 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn enqueue_op(&self, op: PendingOpRecord) -> StoreResult<i64> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::EnqueueOp { op, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn pending_ops(&self, account_id: i64) -> StoreResult<Vec<PendingOpRecord>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::PendingOps { account_id, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn delete_op(&self, id: i64) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::DeleteOp { id, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn messages(&self, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::Messages { folder_id, reply }).await?;
@@ -389,6 +420,11 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
             Command::Attachments { message_id, reply } => {
                 reply_send(reply, attachments(&connection, message_id))
             }
+            Command::EnqueueOp { op, reply } => reply_send(reply, enqueue_op(&connection, &op)),
+            Command::PendingOps { account_id, reply } => {
+                reply_send(reply, pending_ops(&connection, account_id))
+            }
+            Command::DeleteOp { id, reply } => reply_send(reply, delete_op(&connection, id)),
             Command::Messages { folder_id, reply } => {
                 reply_send(reply, messages(&connection, folder_id))
             }
@@ -664,6 +700,46 @@ fn attachments(connection: &Connection, message_id: i64) -> StoreResult<Vec<Atta
         .query_map([message_id], AttachmentRecord::from_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn enqueue_op(connection: &Connection, op: &PendingOpRecord) -> StoreResult<i64> {
+    let created_at = op.created_at.unwrap_or_else(now);
+    connection.execute(
+        "INSERT INTO pending_op (account_id, op_kind, folder_id, target_folder_id, uid, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            op.account_id,
+            op.kind.as_str(),
+            op.folder_id,
+            op.target_folder_id,
+            op.uid,
+            op.payload,
+            created_at,
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+fn pending_ops(connection: &Connection, account_id: i64) -> StoreResult<Vec<PendingOpRecord>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {PENDING_OP_COLUMNS} FROM pending_op WHERE account_id = ?1 ORDER BY id"
+    ))?;
+    let rows = statement
+        .query_map([account_id], PendingOpRecord::from_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn delete_op(connection: &Connection, id: i64) -> StoreResult<()> {
+    connection.execute("DELETE FROM pending_op WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 fn messages(connection: &Connection, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
