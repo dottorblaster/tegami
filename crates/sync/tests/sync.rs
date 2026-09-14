@@ -15,6 +15,7 @@ struct FakeBackend {
     folders: Vec<(String, Vec<Envelope>)>,
     vanished: Vec<(String, u32)>,
     modseq: u64,
+    uid_validity: u32,
     condstore: bool,
     qresync: bool,
 }
@@ -25,6 +26,7 @@ impl FakeBackend {
             folders: Vec::new(),
             vanished: Vec::new(),
             modseq: 0,
+            uid_validity: 1,
             condstore: true,
             qresync: true,
         };
@@ -95,6 +97,22 @@ impl FakeBackend {
         }
         self.vanished.push((folder.to_string(), uid));
     }
+
+    fn rebuild(&mut self, folder: &str, count: usize, uid_validity: u32) {
+        self.uid_validity = uid_validity;
+        let mut envelopes = Vec::new();
+        for uid in 1..=count {
+            self.modseq += 1;
+            envelopes.push(envelope(
+                uid as u32,
+                &format!("{folder} {uid}"),
+                self.modseq,
+            ));
+        }
+        if let Some(existing) = self.folder_mut(folder) {
+            *existing = envelopes;
+        }
+    }
 }
 
 fn envelope(uid: u32, subject: &str, modseq: u64) -> Envelope {
@@ -159,7 +177,7 @@ impl MailBackend for FakeBackend {
     async fn select(&mut self, folder: &str) -> Result<FolderState> {
         let count = self.folder(folder)?.len() as u32;
         Ok(FolderState {
-            uid_validity: 1,
+            uid_validity: self.uid_validity,
             uid_next: count + 1,
             exists: count,
             recent: 0,
@@ -408,5 +426,31 @@ async fn without_condstore_uses_uid_rescan() {
     assert_eq!(
         store.message_uids(inbox_id).await.unwrap(),
         vec![1, 3, new_uid]
+    );
+}
+
+#[tokio::test]
+async fn uidvalidity_change_invalidates_and_resyncs() {
+    let mut backend = FakeBackend::new(&[("INBOX", 3)]);
+    let (store, account_id) = open_store(&mut backend).await;
+    let inbox_id = folder_record(&store, account_id, "INBOX").await.id.unwrap();
+    assert_eq!(store.message_uids(inbox_id).await.unwrap(), vec![1, 2, 3]);
+
+    backend.rebuild("INBOX", 2, 2);
+
+    let folder = folder_record(&store, account_id, "INBOX").await;
+    assert_eq!(folder.uidvalidity, Some(1));
+    let report = sync_folder(&mut backend, &store, &folder, EnvelopeWindow::new(10))
+        .await
+        .unwrap();
+    assert!(report.uidvalidity_changed);
+    assert!(!report.incremental);
+    assert_eq!(report.changed, 2);
+    assert_eq!(report.vanished, 0);
+
+    assert_eq!(store.message_uids(inbox_id).await.unwrap(), vec![1, 2]);
+    assert_eq!(
+        folder_record(&store, account_id, "INBOX").await.uidvalidity,
+        Some(2)
     );
 }

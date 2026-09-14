@@ -57,6 +57,10 @@ enum Command {
         uids: Vec<u32>,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    ClearMessages {
+        folder_id: i64,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     Messages {
         folder_id: i64,
         reply: oneshot::Sender<StoreResult<Vec<MessageRecord>>>,
@@ -185,6 +189,13 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn clear_messages(&self, folder_id: i64) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::ClearMessages { folder_id, reply })
+            .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn messages(&self, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::Messages { folder_id, reply }).await?;
@@ -285,6 +296,9 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
                 uids,
                 reply,
             } => reply_send(reply, delete_messages(&connection, folder_id, &uids)),
+            Command::ClearMessages { folder_id, reply } => {
+                reply_send(reply, clear_messages(&connection, folder_id))
+            }
             Command::Messages { folder_id, reply } => {
                 reply_send(reply, messages(&connection, folder_id))
             }
@@ -498,6 +512,11 @@ fn delete_messages(connection: &Connection, folder_id: i64, uids: &[u32]) -> Sto
         params.push(uid);
     }
     connection.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+    Ok(())
+}
+
+fn clear_messages(connection: &Connection, folder_id: i64) -> StoreResult<()> {
+    connection.execute("DELETE FROM message WHERE folder_id = ?1", [folder_id])?;
     Ok(())
 }
 

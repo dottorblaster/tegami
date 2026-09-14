@@ -285,4 +285,7 @@ async fn folder_state_and_message_deletion() {
     store.delete_messages(folder_id, &[1, 3]).await.unwrap();
     assert_eq!(store.message_uids(folder_id).await.unwrap(), vec![2]);
     store.delete_messages(folder_id, &[]).await.unwrap();
+
+    store.clear_messages(folder_id).await.unwrap();
+    assert!(store.message_uids(folder_id).await.unwrap().is_empty());
 }

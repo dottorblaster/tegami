@@ -77,6 +77,7 @@ impl Default for EnvelopeWindow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderSync {
     pub folder_id: i64,
+    pub uidvalidity_changed: bool,
     pub incremental: bool,
     pub changed: usize,
     pub vanished: usize,
@@ -92,12 +93,24 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
         .id
         .ok_or_else(|| SyncError::MissingFolderId(folder.name.clone()))?;
     let state = backend.select(&folder.name).await?;
+    let previous_validity = folder
+        .uidvalidity
+        .and_then(|value| u32::try_from(value).ok());
+    let uidvalidity_changed = previous_validity
+        .is_some_and(|stored| state.uid_validity != 0 && stored != state.uid_validity);
+    if uidvalidity_changed {
+        store.clear_messages(folder_id).await?;
+    }
     store.set_folder_state(folder_id, state).await?;
 
-    let previous_modseq = folder
-        .highestmodseq
-        .filter(|_| backend.supports_condstore())
-        .map(|modseq| modseq as u64);
+    let previous_modseq = if uidvalidity_changed {
+        None
+    } else {
+        folder
+            .highestmodseq
+            .filter(|_| backend.supports_condstore())
+            .map(|modseq| modseq as u64)
+    };
 
     let (changed, vanished, incremental) = match previous_modseq {
         Some(modseq) => {
@@ -139,6 +152,7 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
     store.delete_messages(folder_id, &vanished).await?;
     Ok(FolderSync {
         folder_id,
+        uidvalidity_changed,
         incremental,
         changed: changed_count,
         vanished: vanished.len(),
