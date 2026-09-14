@@ -1250,7 +1250,6 @@ dependencies = [
 name = "imap"
 version = "0.1.0"
 dependencies = [
- "accounts",
  "async-imap",
  "futures-util",
  "mail-core",
@@ -1258,7 +1257,6 @@ dependencies = [
  "rustls-native-certs",
  "tokio",
  "tokio-rustls",
- "zbus",
 ]
 
 [[package]]

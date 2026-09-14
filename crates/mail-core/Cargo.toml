@@ -17,5 +17,6 @@ rusqlite = { version = "0.40", features = ["bundled-full"] }
 tokio = { version = "1", features = ["fs", "rt", "sync"] }
 
 [dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled-full"] }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

@@ -901,6 +901,9 @@ fn index_body(connection: &Connection, message_id: i64, body_text: &str) -> Stor
 }
 
 fn search(connection: &Connection, query: &str, limit: i64) -> StoreResult<Vec<SearchHit>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     let columns = MESSAGE_COLUMNS
         .split(", ")
         .map(|column| format!("message.{column}"))
@@ -911,7 +914,7 @@ fn search(connection: &Connection, query: &str, limit: i64) -> StoreResult<Vec<S
          FROM message_fts
          JOIN message ON message.id = message_fts.rowid
          WHERE message_fts MATCH ?1
-         ORDER BY rank
+         ORDER BY rank, message.date_recv DESC
          LIMIT ?2"
     );
     let mut statement = connection.prepare(&sql)?;

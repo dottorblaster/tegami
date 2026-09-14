@@ -432,3 +432,36 @@ async fn search_indexes_headers_and_body() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn search_empty_query_returns_no_hits() {
+    let store = Store::open(":memory:").unwrap();
+    assert!(store.search("", 10).await.unwrap().is_empty());
+    assert!(store.search("   ", 10).await.unwrap().is_empty());
+    assert!(store.search(&fts_query(""), 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn migration_backfills_fts_headers() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("tegami.db");
+
+    let store = Store::open(&path).unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    store.upsert_message(message(folder_id, 1)).await.unwrap();
+    drop(store);
+
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.pragma_update(None, "user_version", 1).unwrap();
+    drop(connection);
+
+    let reopened = Store::open(&path).unwrap();
+    let hits = reopened.search(&fts_query("subject"), 10).await.unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message.uid, 1);
+    assert_eq!(
+        reopened.search(&fts_query("Sender"), 10).await.unwrap().len(),
+        1
+    );
+}
