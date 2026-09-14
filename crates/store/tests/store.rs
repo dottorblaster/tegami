@@ -1,0 +1,191 @@
+// Copyright (C) 2026 Tegami contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+use store::{
+    AccountRecord, AccountSource, AuthKind, BodyState, FLAG_FLAGGED, FLAG_SEEN, FolderRecord,
+    MessageRecord, Security, SpecialUse, Store, bits_to_flags, flags_to_bits,
+};
+use tempfile::TempDir;
+
+fn account() -> AccountRecord {
+    AccountRecord {
+        id: None,
+        source: AccountSource::Goa,
+        external_id: "account_1".to_string(),
+        email: "user@example.org".to_string(),
+        display_name: Some("Example User".to_string()),
+        imap_host: Some("imap.example.org".to_string()),
+        imap_port: Some(993),
+        imap_security: Some(Security::Ssl),
+        smtp_host: Some("smtp.example.org".to_string()),
+        smtp_port: Some(465),
+        smtp_security: Some(Security::Ssl),
+        auth_kind: AuthKind::Password,
+        username: Some("user@example.org".to_string()),
+    }
+}
+
+fn folder(account_id: i64) -> FolderRecord {
+    FolderRecord {
+        id: None,
+        account_id,
+        name: "INBOX".to_string(),
+        display_name: Some("Inbox".to_string()),
+        special_use: Some(SpecialUse::Inbox),
+        uidvalidity: Some(42),
+        uidnext: Some(3),
+        highestmodseq: None,
+        unread_count: 1,
+        total_count: 2,
+        subscribed: true,
+    }
+}
+
+fn message(folder_id: i64, uid: u32) -> MessageRecord {
+    MessageRecord {
+        id: None,
+        folder_id,
+        uid,
+        modseq: None,
+        message_id: Some(format!("<{uid}@example.org>")),
+        thread_id: None,
+        subject: format!("subject {uid}"),
+        from_addr: Some("sender@example.org".to_string()),
+        from_name: Some("Sender".to_string()),
+        to_addrs: Some(r#"["user@example.org"]"#.to_string()),
+        cc_addrs: None,
+        date_sent: Some(1_700_000_000),
+        date_recv: Some(1_700_000_001),
+        in_reply_to: None,
+        refs: None,
+        flags: flags_to_bits(mail_core::envelope::MessageFlags {
+            seen: true,
+            ..Default::default()
+        }),
+        has_attach: false,
+        size: Some(1234),
+        structure: None,
+        raw_path: None,
+        body_state: BodyState::None,
+    }
+}
+
+#[tokio::test]
+async fn migrations_create_schema() {
+    let store = Store::open(":memory:").unwrap();
+    // The worker applies migrations at open; any query proves the schema exists.
+    let accounts = store.accounts().await.unwrap();
+    assert!(accounts.is_empty());
+}
+
+#[tokio::test]
+async fn migrations_are_idempotent() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("tegami.db");
+
+    let store = Store::open(&path).unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    assert!(account_id > 0);
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    let accounts = reopened.accounts().await.unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].external_id, "account_1");
+    assert_eq!(accounts[0].email, "user@example.org");
+}
+
+#[tokio::test]
+async fn account_upsert_and_query() {
+    let store = Store::open(":memory:").unwrap();
+    let id = store.upsert_account(account()).await.unwrap();
+
+    let found = store.account("goa", "account_1").await.unwrap().unwrap();
+    assert_eq!(found.id, Some(id));
+    assert_eq!(found.source, AccountSource::Goa);
+    assert_eq!(found.imap_security, Some(Security::Ssl));
+    assert_eq!(found.smtp_port, Some(465));
+    assert_eq!(found.auth_kind, AuthKind::Password);
+    assert_eq!(found.username.as_deref(), Some("user@example.org"));
+
+    let mut updated = account();
+    updated.display_name = Some("Renamed".to_string());
+    updated.auth_kind = AuthKind::OAuth2;
+    let same_id = store.upsert_account(updated).await.unwrap();
+    assert_eq!(same_id, id);
+
+    let accounts = store.accounts().await.unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].display_name.as_deref(), Some("Renamed"));
+    assert_eq!(accounts[0].auth_kind, AuthKind::OAuth2);
+
+    let missing = store.account("eds", "nope").await.unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn folder_and_message_round_trip() {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+
+    let folders = store.folders(account_id).await.unwrap();
+    assert_eq!(folders.len(), 1);
+    assert_eq!(folders[0].name, "INBOX");
+    assert_eq!(folders[0].special_use, Some(SpecialUse::Inbox));
+    assert_eq!(folders[0].uidvalidity, Some(42));
+    assert_eq!(folders[0].unread_count, 1);
+    assert!(folders[0].subscribed);
+
+    store.upsert_message(message(folder_id, 1)).await.unwrap();
+    store.upsert_message(message(folder_id, 2)).await.unwrap();
+
+    let messages = store.messages(folder_id).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].uid, 1);
+    assert_eq!(messages[0].subject, "subject 1");
+    assert_eq!(messages[0].from_addr.as_deref(), Some("sender@example.org"));
+    assert_eq!(messages[0].flags, FLAG_SEEN);
+    assert_eq!(messages[0].body_state, BodyState::None);
+
+    let found = store.message(folder_id, 2).await.unwrap().unwrap();
+    assert_eq!(found.subject, "subject 2");
+    assert!(store.message(folder_id, 9).await.unwrap().is_none());
+
+    let mut updated = message(folder_id, 1);
+    updated.subject = "edited".to_string();
+    updated.raw_path = Some("/tmp/1.eml".to_string());
+    updated.body_state = BodyState::Full;
+    let message_id = store.upsert_message(updated).await.unwrap();
+    assert!(message_id > 0);
+    let messages = store.messages(folder_id).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].subject, "edited");
+    assert_eq!(messages[0].raw_path.as_deref(), Some("/tmp/1.eml"));
+    assert_eq!(messages[0].body_state, BodyState::Full);
+}
+
+#[tokio::test]
+async fn set_message_flags_updates_subset() {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    for uid in 1..=3 {
+        store.upsert_message(message(folder_id, uid)).await.unwrap();
+    }
+
+    let flags = FLAG_SEEN | FLAG_FLAGGED;
+    store
+        .set_message_flags(folder_id, &[1, 3], flags)
+        .await
+        .unwrap();
+
+    let messages = store.messages(folder_id).await.unwrap();
+    assert_eq!(messages[0].flags, flags);
+    assert_eq!(messages[1].flags, FLAG_SEEN);
+    assert_eq!(messages[2].flags, flags);
+    assert!(bits_to_flags(messages[1].flags).seen);
+    assert!(!bits_to_flags(messages[1].flags).flagged);
+
+    store.set_message_flags(folder_id, &[], 0).await.unwrap();
+}

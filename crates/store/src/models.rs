@@ -1,0 +1,274 @@
+// Copyright (C) 2026 Tegami contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! Typed rows mirroring the store schema.
+
+use rusqlite::types::Type;
+use rusqlite::{Error, Row};
+
+fn bad_enum(column: usize, value: &str) -> Error {
+    Error::FromSqlConversionFailure(column, Type::Text, value.to_string().into())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountSource {
+    Goa,
+    Eds,
+}
+
+impl AccountSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Goa => "goa",
+            Self::Eds => "eds",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthKind {
+    OAuth2,
+    Password,
+}
+
+impl AuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OAuth2 => "oauth2",
+            Self::Password => "password",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Security {
+    Ssl,
+    StartTls,
+    None,
+}
+
+impl Security {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ssl => "ssl",
+            Self::StartTls => "starttls",
+            Self::None => "none",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialUse {
+    Inbox,
+    Sent,
+    Drafts,
+    Trash,
+    Junk,
+    Archive,
+}
+
+impl SpecialUse {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Inbox => "inbox",
+            Self::Sent => "sent",
+            Self::Drafts => "drafts",
+            Self::Trash => "trash",
+            Self::Junk => "junk",
+            Self::Archive => "archive",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyState {
+    None,
+    Headers,
+    Full,
+}
+
+impl BodyState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Headers => "headers",
+            Self::Full => "full",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccountRecord {
+    /// Populated by the database on insert; ignored on upsert.
+    pub id: Option<i64>,
+    pub source: AccountSource,
+    pub external_id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<i64>,
+    pub imap_security: Option<Security>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<i64>,
+    pub smtp_security: Option<Security>,
+    pub auth_kind: AuthKind,
+    pub username: Option<String>,
+}
+
+impl AccountRecord {
+    pub fn from_row(row: &Row<'_>) -> Result<Self, Error> {
+        let source: String = row.get(1)?;
+        let auth_kind: String = row.get(11)?;
+        Ok(Self {
+            id: Some(row.get(0)?),
+            source: match source.as_str() {
+                "goa" => AccountSource::Goa,
+                "eds" => AccountSource::Eds,
+                other => {
+                    return Err(bad_enum(1, other));
+                }
+            },
+            external_id: row.get(2)?,
+            email: row.get(3)?,
+            display_name: row.get(4)?,
+            imap_host: row.get(5)?,
+            imap_port: row.get(6)?,
+            imap_security: row
+                .get::<_, Option<String>>(7)?
+                .map(|value| parse_security(&value))
+                .transpose()?,
+            smtp_host: row.get(8)?,
+            smtp_port: row.get(9)?,
+            smtp_security: row
+                .get::<_, Option<String>>(10)?
+                .map(|value| parse_security(&value))
+                .transpose()?,
+            auth_kind: match auth_kind.as_str() {
+                "oauth2" => AuthKind::OAuth2,
+                "password" => AuthKind::Password,
+                other => return Err(bad_enum(11, other)),
+            },
+            username: row.get(12)?,
+        })
+    }
+}
+
+pub const ACCOUNT_COLUMNS: &str = "id, source, external_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, auth_kind, username";
+pub const FOLDER_COLUMNS: &str = "id, account_id, name, display_name, special_use, uidvalidity, uidnext, highestmodseq, unread_count, total_count, subscribed";
+pub const MESSAGE_COLUMNS: &str = "id, folder_id, uid, modseq, message_id, thread_id, subject, from_addr, from_name, to_addrs, cc_addrs, date_sent, date_recv, in_reply_to, refs, flags, has_attach, size, structure, raw_path, body_state";
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FolderRecord {
+    pub id: Option<i64>,
+    pub account_id: i64,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub special_use: Option<SpecialUse>,
+    pub uidvalidity: Option<i64>,
+    pub uidnext: Option<i64>,
+    pub highestmodseq: Option<i64>,
+    pub unread_count: i64,
+    pub total_count: i64,
+    pub subscribed: bool,
+}
+
+impl FolderRecord {
+    pub fn from_row(row: &Row<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            id: Some(row.get(0)?),
+            account_id: row.get(1)?,
+            name: row.get(2)?,
+            display_name: row.get(3)?,
+            special_use: row
+                .get::<_, Option<String>>(4)?
+                .map(|value| parse_special_use(&value))
+                .transpose()?,
+            uidvalidity: row.get(5)?,
+            uidnext: row.get(6)?,
+            highestmodseq: row.get(7)?,
+            unread_count: row.get(8)?,
+            total_count: row.get(9)?,
+            subscribed: row.get(10)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageRecord {
+    pub id: Option<i64>,
+    pub folder_id: i64,
+    pub uid: u32,
+    pub modseq: Option<i64>,
+    pub message_id: Option<String>,
+    pub thread_id: Option<i64>,
+    pub subject: String,
+    pub from_addr: Option<String>,
+    pub from_name: Option<String>,
+    pub to_addrs: Option<String>,
+    pub cc_addrs: Option<String>,
+    pub date_sent: Option<i64>,
+    pub date_recv: Option<i64>,
+    pub in_reply_to: Option<String>,
+    pub refs: Option<String>,
+    pub flags: i64,
+    pub has_attach: bool,
+    pub size: Option<i64>,
+    pub structure: Option<String>,
+    pub raw_path: Option<String>,
+    pub body_state: BodyState,
+}
+
+impl MessageRecord {
+    pub fn from_row(row: &Row<'_>) -> Result<Self, Error> {
+        let body_state: String = row.get(20)?;
+        Ok(Self {
+            id: Some(row.get(0)?),
+            folder_id: row.get(1)?,
+            uid: row.get(2)?,
+            modseq: row.get(3)?,
+            message_id: row.get(4)?,
+            thread_id: row.get(5)?,
+            subject: row.get(6)?,
+            from_addr: row.get(7)?,
+            from_name: row.get(8)?,
+            to_addrs: row.get(9)?,
+            cc_addrs: row.get(10)?,
+            date_sent: row.get(11)?,
+            date_recv: row.get(12)?,
+            in_reply_to: row.get(13)?,
+            refs: row.get(14)?,
+            flags: row.get(15)?,
+            has_attach: row.get(16)?,
+            size: row.get(17)?,
+            structure: row.get(18)?,
+            raw_path: row.get(19)?,
+            body_state: match body_state.as_str() {
+                "none" => BodyState::None,
+                "headers" => BodyState::Headers,
+                "full" => BodyState::Full,
+                other => return Err(bad_enum(20, other)),
+            },
+        })
+    }
+}
+
+fn parse_security(value: &str) -> Result<Security, Error> {
+    match value {
+        "ssl" => Ok(Security::Ssl),
+        "starttls" => Ok(Security::StartTls),
+        "none" => Ok(Security::None),
+        other => Err(bad_enum(4, other)),
+    }
+}
+
+fn parse_special_use(value: &str) -> Result<SpecialUse, Error> {
+    match value {
+        "inbox" => Ok(SpecialUse::Inbox),
+        "sent" => Ok(SpecialUse::Sent),
+        "drafts" => Ok(SpecialUse::Drafts),
+        "trash" => Ok(SpecialUse::Trash),
+        "junk" => Ok(SpecialUse::Junk),
+        "archive" => Ok(SpecialUse::Archive),
+        other => Err(bad_enum(4, other)),
+    }
+}

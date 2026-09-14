@@ -1,0 +1,21 @@
+[package]
+name = "store"
+description = "SQLite account and mailbox store for Tegami"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rusqlite = { version = "0.40", features = ["bundled-full"] }
+mail-core = { path = "../mail-core" }
+tokio = { version = "1", features = ["sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
