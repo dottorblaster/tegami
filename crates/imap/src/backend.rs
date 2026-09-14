@@ -332,6 +332,11 @@ fn folder_role(name: &str, attributes: &[NameAttribute<'_>]) -> FolderRole {
             NameAttribute::Junk => FolderRole::Junk,
             NameAttribute::Sent => FolderRole::Sent,
             NameAttribute::Trash => FolderRole::Trash,
+            NameAttribute::Extension(extension)
+                if extension.eq_ignore_ascii_case("\\important") =>
+            {
+                FolderRole::Important
+            }
             _ => continue,
         };
         return role;
@@ -524,6 +529,15 @@ mod tests {
         assert_eq!(drafts, mail_core::FolderRole::Drafts);
         let other = folder_role("Work", &[NameAttribute::NoInferiors]);
         assert_eq!(other, mail_core::FolderRole::Other);
+        let important = folder_role(
+            "[Gmail]/Important",
+            &[NameAttribute::Extension("\\Important".into())],
+        );
+        assert_eq!(important, mail_core::FolderRole::Important);
+        let all = folder_role("All Mail", &[NameAttribute::All]);
+        assert_eq!(all, mail_core::FolderRole::All);
+        let flagged = folder_role("Starred", &[NameAttribute::Flagged]);
+        assert_eq!(flagged, mail_core::FolderRole::Flagged);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 //! Typed rows mirroring the store schema.
 
+use mail_core::folder::{Folder, FolderRole};
 use rusqlite::types::Type;
 use rusqlite::{Error, Row};
 
@@ -65,6 +66,9 @@ pub enum SpecialUse {
     Trash,
     Junk,
     Archive,
+    Important,
+    All,
+    Flagged,
 }
 
 impl SpecialUse {
@@ -76,6 +80,24 @@ impl SpecialUse {
             Self::Trash => "trash",
             Self::Junk => "junk",
             Self::Archive => "archive",
+            Self::Important => "important",
+            Self::All => "all",
+            Self::Flagged => "flagged",
+        }
+    }
+
+    pub fn from_role(role: FolderRole) -> Option<Self> {
+        match role {
+            FolderRole::Inbox => Some(Self::Inbox),
+            FolderRole::Sent => Some(Self::Sent),
+            FolderRole::Drafts => Some(Self::Drafts),
+            FolderRole::Trash => Some(Self::Trash),
+            FolderRole::Junk => Some(Self::Junk),
+            FolderRole::Archive => Some(Self::Archive),
+            FolderRole::Important => Some(Self::Important),
+            FolderRole::All => Some(Self::All),
+            FolderRole::Flagged => Some(Self::Flagged),
+            FolderRole::Other => None,
         }
     }
 }
@@ -173,6 +195,22 @@ pub struct FolderRecord {
 }
 
 impl FolderRecord {
+    pub fn from_folder(account_id: i64, folder: &Folder) -> Self {
+        Self {
+            id: None,
+            account_id,
+            name: folder.id.clone(),
+            display_name: Some(folder.name.clone()).filter(|name| !name.is_empty()),
+            special_use: SpecialUse::from_role(folder.role),
+            uidvalidity: None,
+            uidnext: None,
+            highestmodseq: None,
+            unread_count: 0,
+            total_count: 0,
+            subscribed: true,
+        }
+    }
+
     pub fn from_row(row: &Row<'_>) -> Result<Self, Error> {
         Ok(Self {
             id: Some(row.get(0)?),
@@ -269,6 +307,9 @@ fn parse_special_use(value: &str) -> Result<SpecialUse, Error> {
         "trash" => Ok(SpecialUse::Trash),
         "junk" => Ok(SpecialUse::Junk),
         "archive" => Ok(SpecialUse::Archive),
+        "important" => Ok(SpecialUse::Important),
+        "all" => Ok(SpecialUse::All),
+        "flagged" => Ok(SpecialUse::Flagged),
         other => Err(bad_enum(4, other)),
     }
 }

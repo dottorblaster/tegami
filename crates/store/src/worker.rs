@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use mail_core::folder::Folder;
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
@@ -36,6 +37,11 @@ enum Command {
     UpsertFolder {
         folder: FolderRecord,
         reply: oneshot::Sender<StoreResult<i64>>,
+    },
+    SyncFolders {
+        account_id: i64,
+        folders: Vec<Folder>,
+        reply: oneshot::Sender<StoreResult<Vec<FolderRecord>>>,
     },
     Messages {
         folder_id: i64,
@@ -118,6 +124,21 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn sync_folders(
+        &self,
+        account_id: i64,
+        folders: &[Folder],
+    ) -> StoreResult<Vec<FolderRecord>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::SyncFolders {
+            account_id,
+            folders: folders.to_vec(),
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn messages(&self, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::Messages { folder_id, reply }).await?;
@@ -174,6 +195,7 @@ impl Drop for Store {
 
 fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()> {
     let mut connection = Connection::open(path)?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     schema::migrate(&mut connection)?;
     while let Some(command) = receiver.blocking_recv() {
         match command {
@@ -192,6 +214,11 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
             Command::UpsertFolder { folder, reply } => {
                 reply_send(reply, upsert_folder(&connection, &folder))
             }
+            Command::SyncFolders {
+                account_id,
+                folders,
+                reply,
+            } => reply_send(reply, sync_folders(&mut connection, account_id, &folders)),
             Command::Messages { folder_id, reply } => {
                 reply_send(reply, messages(&connection, folder_id))
             }
@@ -308,6 +335,56 @@ fn upsert_folder(connection: &Connection, folder: &FolderRecord) -> StoreResult<
         ],
     )?;
     Ok(connection.last_insert_rowid())
+}
+
+fn sync_folders(
+    connection: &mut Connection,
+    account_id: i64,
+    discovered: &[Folder],
+) -> StoreResult<Vec<FolderRecord>> {
+    let transaction = connection.transaction()?;
+    for folder in discovered {
+        upsert_discovered_folder(&transaction, &FolderRecord::from_folder(account_id, folder))?;
+    }
+    delete_missing_folders(&transaction, account_id, discovered)?;
+    transaction.commit()?;
+    folders(connection, account_id)
+}
+
+fn upsert_discovered_folder(connection: &Connection, folder: &FolderRecord) -> StoreResult<()> {
+    connection.execute(
+        "INSERT INTO folder (account_id, name, display_name, special_use)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(account_id, name) DO UPDATE SET
+           display_name = excluded.display_name, special_use = excluded.special_use",
+        rusqlite::params![
+            folder.account_id,
+            folder.name,
+            folder.display_name,
+            folder.special_use.map(|value| value.as_str()),
+        ],
+    )?;
+    Ok(())
+}
+
+fn delete_missing_folders(
+    connection: &Connection,
+    account_id: i64,
+    discovered: &[Folder],
+) -> StoreResult<()> {
+    if discovered.is_empty() {
+        connection.execute("DELETE FROM folder WHERE account_id = ?1", [account_id])?;
+        return Ok(());
+    }
+    let placeholders = discovered.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("DELETE FROM folder WHERE account_id = ?1 AND name NOT IN ({placeholders})");
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(discovered.len() + 1);
+    params.push(&account_id);
+    for folder in discovered {
+        params.push(&folder.id);
+    }
+    connection.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+    Ok(())
 }
 
 fn messages(connection: &Connection, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {

@@ -166,6 +166,64 @@ async fn folder_and_message_round_trip() {
 }
 
 #[tokio::test]
+async fn sync_folders_persists_and_prunes() {
+    use mail_core::folder::{Folder, FolderRole};
+
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+
+    let inbox = Folder {
+        id: "INBOX".to_string(),
+        name: "Inbox".to_string(),
+        role: FolderRole::Inbox,
+    };
+    let important = Folder {
+        id: "[Gmail]/Important".to_string(),
+        name: "Important".to_string(),
+        role: FolderRole::Important,
+    };
+    let work = Folder {
+        id: "Work".to_string(),
+        name: "Work".to_string(),
+        role: FolderRole::Other,
+    };
+
+    let mut seeded = FolderRecord::from_folder(account_id, &inbox);
+    seeded.uidvalidity = Some(99);
+    seeded.uidnext = Some(12);
+    store.upsert_folder(seeded).await.unwrap();
+
+    let discovered = vec![inbox.clone(), important.clone(), work.clone()];
+    let stored = store.sync_folders(account_id, &discovered).await.unwrap();
+    assert_eq!(stored.len(), 3);
+
+    let inbox_record = stored.iter().find(|folder| folder.name == "INBOX").unwrap();
+    assert_eq!(inbox_record.special_use, Some(SpecialUse::Inbox));
+    assert_eq!(inbox_record.display_name.as_deref(), Some("Inbox"));
+    assert_eq!(inbox_record.uidvalidity, Some(99));
+    assert_eq!(inbox_record.uidnext, Some(12));
+
+    let important_record = stored
+        .iter()
+        .find(|folder| folder.name == "[Gmail]/Important")
+        .unwrap();
+    assert_eq!(important_record.special_use, Some(SpecialUse::Important));
+
+    let work_record = stored.iter().find(|folder| folder.name == "Work").unwrap();
+    assert_eq!(work_record.special_use, None);
+    let work_id = work_record.id.unwrap();
+    store.upsert_message(message(work_id, 1)).await.unwrap();
+
+    let pruned = store
+        .sync_folders(account_id, &[inbox.clone(), important.clone()])
+        .await
+        .unwrap();
+    assert_eq!(pruned.len(), 2);
+    assert!(pruned.iter().all(|folder| folder.name != "Work"));
+    assert!(store.messages(work_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn set_message_flags_updates_subset() {
     let store = Store::open(":memory:").unwrap();
     let account_id = store.upsert_account(account()).await.unwrap();
