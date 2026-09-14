@@ -7,7 +7,7 @@
 
 [workspace]
 resolver = "3"
-members = ["crates/mail-core", "crates/accounts", "crates/imap", "crates/store", "crates/app"]
+members = ["crates/mail-core", "crates/accounts", "crates/imap", "crates/store", "crates/sync", "crates/app"]
 
 # Metadata shared by every member via `version.workspace = true` & co.,
 # so they stay in lockstep.

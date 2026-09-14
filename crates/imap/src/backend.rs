@@ -170,12 +170,30 @@ impl MailBackend for ImapBackend {
         })
     }
 
-    async fn fetch_envelopes(&mut self, folder: &str) -> Result<Vec<Envelope>> {
+    async fn uids(&mut self, folder: &str) -> Result<Vec<u32>> {
         let folder = folder.to_string();
         let session = self.session()?;
         session.select(&folder).await.map_err(map_err)?;
+        let mut uids: Vec<u32> = session
+            .uid_search("ALL")
+            .await
+            .map_err(map_err)?
+            .into_iter()
+            .collect();
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
+    async fn fetch_envelopes(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<Envelope>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let folder = folder.to_string();
+        let id_set = uid_set(uids);
+        let session = self.session()?;
+        session.select(&folder).await.map_err(map_err)?;
         let messages = session
-            .uid_fetch("1:*", "(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE)")
+            .uid_fetch(id_set, "(UID ENVELOPE FLAGS RFC822.SIZE INTERNALDATE)")
             .await
             .map_err(map_err)?;
         let mut envelopes = Vec::new();

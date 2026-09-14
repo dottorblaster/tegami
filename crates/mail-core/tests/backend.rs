@@ -134,14 +134,24 @@ impl MailBackend for FakeBackend {
         })
     }
 
-    async fn fetch_envelopes(&mut self, folder: &str) -> Result<Vec<Envelope>> {
+    async fn uids(&mut self, folder: &str) -> Result<Vec<u32>> {
         let folder = self
             .folders
             .get(folder)
             .ok_or_else(|| MailError::Protocol(format!("no such folder {folder}")))?;
-        let mut envelopes: Vec<Envelope> = folder
-            .messages
-            .values()
+        let mut uids: Vec<u32> = folder.messages.keys().copied().collect();
+        uids.sort_unstable();
+        Ok(uids)
+    }
+
+    async fn fetch_envelopes(&mut self, folder: &str, uids: &[u32]) -> Result<Vec<Envelope>> {
+        let folder = self
+            .folders
+            .get(folder)
+            .ok_or_else(|| MailError::Protocol(format!("no such folder {folder}")))?;
+        let mut envelopes: Vec<Envelope> = uids
+            .iter()
+            .filter_map(|uid| folder.messages.get(uid))
             .map(|message| message.envelope.clone())
             .collect();
         envelopes.sort_by_key(|envelope| envelope.uid);
@@ -291,7 +301,13 @@ async fn mail_backend_round_trip() {
     assert_eq!(state.uid_validity, 42);
     assert_eq!(state.exists, 2);
 
-    let envelopes = backend.fetch_envelopes("INBOX").await.unwrap();
+    let backend_uids = backend.uids("INBOX").await.unwrap();
+    assert_eq!(backend_uids, vec![draft_uid, draft_uid + 1]);
+
+    let envelopes = backend
+        .fetch_envelopes("INBOX", &backend_uids)
+        .await
+        .unwrap();
     assert_eq!(envelopes.len(), 2);
     assert_eq!(envelopes[0].subject, "hello");
     assert_eq!(
@@ -312,7 +328,10 @@ async fn mail_backend_round_trip() {
         .set_flags("INBOX", &[draft_uid], change)
         .await
         .unwrap();
-    let envelopes = backend.fetch_envelopes("INBOX").await.unwrap();
+    let envelopes = backend
+        .fetch_envelopes("INBOX", &backend_uids)
+        .await
+        .unwrap();
     let draft = envelopes.iter().find(|e| e.uid == draft_uid).unwrap();
     assert!(draft.flags.seen);
     assert!(draft.flags.flagged);

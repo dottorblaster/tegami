@@ -56,6 +56,10 @@ enum Command {
         message: MessageRecord,
         reply: oneshot::Sender<StoreResult<i64>>,
     },
+    UpsertMessages {
+        messages: Vec<MessageRecord>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     SetMessageFlags {
         folder_id: i64,
         uids: Vec<u32>,
@@ -162,6 +166,13 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn upsert_messages(&self, messages: Vec<MessageRecord>) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::UpsertMessages { messages, reply })
+            .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn set_message_flags(
         &self,
         folder_id: i64,
@@ -229,6 +240,9 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
             } => reply_send(reply, message(&connection, folder_id, uid)),
             Command::UpsertMessage { message, reply } => {
                 reply_send(reply, upsert_message(&connection, &message))
+            }
+            Command::UpsertMessages { messages, reply } => {
+                reply_send(reply, upsert_messages(&mut connection, &messages))
             }
             Command::SetMessageFlags {
                 folder_id,
@@ -448,6 +462,15 @@ fn upsert_message(connection: &Connection, message: &MessageRecord) -> StoreResu
         ],
     )?;
     Ok(connection.last_insert_rowid())
+}
+
+fn upsert_messages(connection: &mut Connection, messages: &[MessageRecord]) -> StoreResult<()> {
+    let transaction = connection.transaction()?;
+    for message in messages {
+        upsert_message(&transaction, message)?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn set_message_flags(

@@ -79,10 +79,12 @@ pub trait MailBackend {
     /// Selects a folder and reports its state.
     fn select(&mut self, folder: &str) -> impl Future<Output = Result<FolderState>> + Send;
 
-    /// Fetches the envelope of every message in a folder.
+    fn uids(&mut self, folder: &str) -> impl Future<Output = Result<Vec<u32>>> + Send;
+
     fn fetch_envelopes(
         &mut self,
         folder: &str,
+        uids: &[u32],
     ) -> impl Future<Output = Result<Vec<Envelope>>> + Send;
 
     /// Fetches the raw MIME body of a message, identified by its UID.
