@@ -7,9 +7,9 @@ use mail_core::account::AccountConfig;
 use mail_core::backend::Result;
 use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
 use mail_core::folder::{Folder, FolderDelta, FolderRole, FolderState};
+use mail_core::store::{AccountRecord, AccountSource, AuthKind, Store};
+use mail_core::sync::{EnvelopeWindow, fetch_body, sync_account, sync_folder};
 use mail_core::{Credential, MailBackend, MailError};
-use store::{AccountRecord, AccountSource, AuthKind, Store};
-use sync::{EnvelopeWindow, fetch_body, sync_account, sync_folder};
 use tempfile::TempDir;
 
 struct FakeBackend {
@@ -291,7 +291,11 @@ async fn open_store(backend: &mut FakeBackend) -> (Store, i64) {
     (store, account_id)
 }
 
-async fn folder_record(store: &Store, account_id: i64, name: &str) -> store::FolderRecord {
+async fn folder_record(
+    store: &Store,
+    account_id: i64,
+    name: &str,
+) -> mail_core::store::FolderRecord {
     store
         .folders(account_id)
         .await
@@ -347,7 +351,7 @@ async fn initial_sync_persists_window() {
         .iter()
         .find(|folder| folder.name == "INBOX")
         .unwrap();
-    assert_eq!(inbox.special_use, Some(store::SpecialUse::Inbox));
+    assert_eq!(inbox.special_use, Some(mail_core::store::SpecialUse::Inbox));
     assert!(inbox.highestmodseq.is_some());
     let inbox_id = inbox.id.unwrap();
 
@@ -364,8 +368,11 @@ async fn initial_sync_persists_window() {
     assert_eq!(messages[1].size, Some(105));
     assert_eq!(messages[1].date_recv, Some(1_700_000_005));
     assert_eq!(messages[1].modseq, Some(5));
-    assert_eq!(messages[0].flags & store::FLAG_SEEN, store::FLAG_SEEN);
-    assert_eq!(messages[1].flags & store::FLAG_SEEN, 0);
+    assert_eq!(
+        messages[0].flags & mail_core::store::FLAG_SEEN,
+        mail_core::store::FLAG_SEEN
+    );
+    assert_eq!(messages[1].flags & mail_core::store::FLAG_SEEN, 0);
 
     let archive = folders
         .iter()
@@ -397,7 +404,9 @@ async fn incremental_sync_applies_delta_and_vanished() {
         store.message_uids(inbox_id).await.unwrap(),
         vec![1, 3, new_uid]
     );
-    assert!(store.message(inbox_id, 1).await.unwrap().unwrap().flags & store::FLAG_SEEN != 0);
+    assert!(
+        store.message(inbox_id, 1).await.unwrap().unwrap().flags & mail_core::store::FLAG_SEEN != 0
+    );
     assert!(store.message(inbox_id, 2).await.unwrap().is_none());
     assert_eq!(
         store
@@ -503,7 +512,7 @@ async fn fetch_body_stores_raw_and_attachments() {
     assert!(String::from_utf8_lossy(&raw).contains("doc.pdf"));
 
     let message = store.message(inbox_id, 1).await.unwrap().unwrap();
-    assert_eq!(message.body_state, store::BodyState::Full);
+    assert_eq!(message.body_state, mail_core::store::BodyState::Full);
     assert!(message.has_attach);
     assert_eq!(
         message.raw_path.as_deref(),

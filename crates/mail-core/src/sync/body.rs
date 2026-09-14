@@ -3,11 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use mail_core::MailBackend;
-use mail_mime::Attachment;
-use store::{AttachmentRecord, BodyState, Store};
+use crate::MailBackend;
+use crate::mime::Attachment;
+use crate::store::{AttachmentRecord, BodyState, Store};
 
-use crate::{Result, SyncError};
+use super::{Result, SyncError};
 
 pub struct BodyFetch {
     pub message_id: i64,
@@ -36,7 +36,7 @@ pub async fn fetch_body<B: MailBackend + ?Sized>(
     let raw_path = body_dir.join(format!("{folder_id}-{uid}.eml"));
     tokio::fs::write(&raw_path, &raw).await?;
 
-    let attachments: Vec<AttachmentRecord> = mail_mime::parse(&raw)
+    let attachments: Vec<AttachmentRecord> = crate::mime::parse(&raw)
         .map(|parsed| {
             parsed
                 .attachments

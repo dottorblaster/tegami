@@ -1446,14 +1446,10 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 name = "mail-core"
 version = "0.1.0"
 dependencies = [
- "tokio",
-]
-
-[[package]]
-name = "mail-mime"
-version = "0.1.0"
-dependencies = [
  "mail-parser",
+ "rusqlite",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -2290,16 +2286,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "store"
-version = "0.1.0"
-dependencies = [
- "mail-core",
- "rusqlite",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2325,17 +2311,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "sync"
-version = "0.1.0"
-dependencies = [
- "mail-core",
- "mail-mime",
- "store",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

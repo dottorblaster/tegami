@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Tegami contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use store::{
+use mail_core::store::{
     AccountRecord, AccountSource, AttachmentRecord, AuthKind, BodyState, FLAG_FLAGGED, FLAG_SEEN,
     FolderRecord, MessageRecord, Security, SpecialUse, Store, bits_to_flags, flags_to_bits,
 };

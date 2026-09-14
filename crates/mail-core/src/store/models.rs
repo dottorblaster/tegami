@@ -3,7 +3,7 @@
 
 //! Typed rows mirroring the store schema.
 
-use mail_core::folder::{Folder, FolderRole};
+use crate::folder::{Folder, FolderRole};
 use rusqlite::types::Type;
 use rusqlite::{Error, Row};
 

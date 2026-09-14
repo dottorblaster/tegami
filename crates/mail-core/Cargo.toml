@@ -1,6 +1,6 @@
 [package]
 name = "mail-core"
-description = "Core mail model and backend abstractions for Tegami"
+description = "Core mail model, backend abstractions, store and sync for Tegami"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,10 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+mail-parser = "0.11"
+rusqlite = { version = "0.40", features = ["bundled-full"] }
+tokio = { version = "1", features = ["fs", "sync"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

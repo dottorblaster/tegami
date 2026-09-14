@@ -27,7 +27,7 @@ pub const FLAG_FLAGGED: i64 = 1 << 2;
 pub const FLAG_DRAFT: i64 = 1 << 3;
 pub const FLAG_DELETED: i64 = 1 << 4;
 
-pub fn flags_to_bits(flags: mail_core::envelope::MessageFlags) -> i64 {
+pub fn flags_to_bits(flags: crate::envelope::MessageFlags) -> i64 {
     let mut bits = 0;
     if flags.seen {
         bits |= FLAG_SEEN;
@@ -47,8 +47,8 @@ pub fn flags_to_bits(flags: mail_core::envelope::MessageFlags) -> i64 {
     bits
 }
 
-pub fn bits_to_flags(bits: i64) -> mail_core::envelope::MessageFlags {
-    mail_core::envelope::MessageFlags {
+pub fn bits_to_flags(bits: i64) -> crate::envelope::MessageFlags {
+    crate::envelope::MessageFlags {
         seen: bits & FLAG_SEEN != 0,
         answered: bits & FLAG_ANSWERED != 0,
         flagged: bits & FLAG_FLAGGED != 0,

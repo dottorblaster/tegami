@@ -6,9 +6,9 @@ mod message;
 
 use std::collections::HashSet;
 
-use mail_core::MailBackend;
-use mail_core::backend::MailError;
-use store::{FolderRecord, MessageRecord, Store, StoreError};
+use crate::MailBackend;
+use crate::backend::MailError;
+use crate::store::{FolderRecord, MessageRecord, Store, StoreError};
 
 pub use body::{BodyFetch, fetch_body};
 pub use message::message_record;

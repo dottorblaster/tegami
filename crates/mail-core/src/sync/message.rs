@@ -3,8 +3,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mail_core::envelope::{Address, Envelope};
-use store::{BodyState, MessageRecord, flags_to_bits};
+use crate::envelope::{Address, Envelope};
+use crate::store::{BodyState, MessageRecord, flags_to_bits};
 
 pub fn message_record(folder_id: i64, envelope: &Envelope) -> MessageRecord {
     let (from_addr, from_name) = envelope
@@ -85,7 +85,7 @@ fn unix_seconds(time: SystemTime) -> Option<i64> {
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use mail_core::envelope::{Address, Envelope, MessageFlags};
+    use crate::envelope::{Address, Envelope, MessageFlags};
 
     use super::message_record;
 
@@ -134,6 +134,6 @@ mod tests {
             record.refs.as_deref(),
             Some(r#"["<5@example.org>","<6@example.org>"]"#)
         );
-        assert_eq!(record.flags, store::FLAG_SEEN);
+        assert_eq!(record.flags, crate::store::FLAG_SEEN);
     }
 }

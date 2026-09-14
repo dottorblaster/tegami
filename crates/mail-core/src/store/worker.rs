@@ -9,16 +9,16 @@
 
 use std::path::Path;
 
-use mail_core::folder::{Folder, FolderState};
+use crate::folder::{Folder, FolderState};
 use rusqlite::{Connection, OptionalExtension};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::error::{StoreError, StoreResult};
-use crate::models::{
+use super::error::{StoreError, StoreResult};
+use super::models::{
     ACCOUNT_COLUMNS, ATTACHMENT_COLUMNS, AccountRecord, AttachmentRecord, BodyState,
     FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord,
 };
-use crate::schema;
+use super::schema;
 
 enum Command {
     Accounts(oneshot::Sender<StoreResult<Vec<AccountRecord>>>),
