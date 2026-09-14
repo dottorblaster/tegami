@@ -13,7 +13,10 @@ workspace = true
 
 [dependencies]
 mail-core = { path = "../mail-core" }
+mail-mime = { path = "../mail-mime" }
 store = { path = "../store" }
+tokio = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

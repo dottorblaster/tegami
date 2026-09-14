@@ -178,6 +178,8 @@ impl AccountRecord {
 pub const ACCOUNT_COLUMNS: &str = "id, source, external_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, auth_kind, username";
 pub const FOLDER_COLUMNS: &str = "id, account_id, name, display_name, special_use, uidvalidity, uidnext, highestmodseq, unread_count, total_count, subscribed";
 pub const MESSAGE_COLUMNS: &str = "id, folder_id, uid, modseq, message_id, thread_id, subject, from_addr, from_name, to_addrs, cc_addrs, date_sent, date_recv, in_reply_to, refs, flags, has_attach, size, structure, raw_path, body_state";
+pub const ATTACHMENT_COLUMNS: &str =
+    "id, message_id, part_id, filename, mime_type, size, content_id, disk_path";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderRecord {
@@ -286,6 +288,33 @@ impl MessageRecord {
                 "full" => BodyState::Full,
                 other => return Err(bad_enum(20, other)),
             },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentRecord {
+    pub id: Option<i64>,
+    pub message_id: i64,
+    pub part_id: String,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    pub size: Option<i64>,
+    pub content_id: Option<String>,
+    pub disk_path: Option<String>,
+}
+
+impl AttachmentRecord {
+    pub fn from_row(row: &Row<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            id: Some(row.get(0)?),
+            message_id: row.get(1)?,
+            part_id: row.get(2)?,
+            filename: row.get(3)?,
+            mime_type: row.get(4)?,
+            size: row.get(5)?,
+            content_id: row.get(6)?,
+            disk_path: row.get(7)?,
         })
     }
 }

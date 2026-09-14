@@ -1,6 +1,7 @@
 // Copyright (C) 2026 Tegami contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+mod body;
 mod message;
 
 use std::collections::HashSet;
@@ -9,13 +10,16 @@ use mail_core::MailBackend;
 use mail_core::backend::MailError;
 use store::{FolderRecord, MessageRecord, Store, StoreError};
 
+pub use body::{BodyFetch, fetch_body};
 pub use message::message_record;
 
 #[derive(Debug)]
 pub enum SyncError {
     Backend(MailError),
     Store(StoreError),
+    Io(std::io::Error),
     MissingFolderId(String),
+    MissingMessage(i64, u32),
 }
 
 impl std::fmt::Display for SyncError {
@@ -23,7 +27,11 @@ impl std::fmt::Display for SyncError {
         match self {
             Self::Backend(err) => write!(f, "sync backend error: {err}"),
             Self::Store(err) => write!(f, "sync store error: {err}"),
+            Self::Io(err) => write!(f, "sync i/o error: {err}"),
             Self::MissingFolderId(name) => write!(f, "folder {name} has no store id"),
+            Self::MissingMessage(folder_id, uid) => {
+                write!(f, "no message {uid} in folder {folder_id}")
+            }
         }
     }
 }
@@ -33,7 +41,8 @@ impl std::error::Error for SyncError {
         match self {
             Self::Backend(err) => Some(err),
             Self::Store(err) => Some(err),
-            Self::MissingFolderId(_) => None,
+            Self::Io(err) => Some(err),
+            Self::MissingFolderId(_) | Self::MissingMessage(_, _) => None,
         }
     }
 }
@@ -47,6 +56,12 @@ impl From<MailError> for SyncError {
 impl From<StoreError> for SyncError {
     fn from(err: StoreError) -> Self {
         Self::Store(err)
+    }
+}
+
+impl From<std::io::Error> for SyncError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
     }
 }
 

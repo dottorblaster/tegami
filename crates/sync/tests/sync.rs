@@ -9,10 +9,12 @@ use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
 use mail_core::folder::{Folder, FolderDelta, FolderRole, FolderState};
 use mail_core::{Credential, MailBackend, MailError};
 use store::{AccountRecord, AccountSource, AuthKind, Store};
-use sync::{EnvelopeWindow, sync_account, sync_folder};
+use sync::{EnvelopeWindow, fetch_body, sync_account, sync_folder};
+use tempfile::TempDir;
 
 struct FakeBackend {
     folders: Vec<(String, Vec<Envelope>)>,
+    bodies: Vec<((String, u32), Vec<u8>)>,
     vanished: Vec<(String, u32)>,
     modseq: u64,
     uid_validity: u32,
@@ -24,6 +26,7 @@ impl FakeBackend {
     fn new(folders: &[(&str, usize)]) -> Self {
         let mut backend = Self {
             folders: Vec::new(),
+            bodies: Vec::new(),
             vanished: Vec::new(),
             modseq: 0,
             uid_validity: 1,
@@ -76,6 +79,10 @@ impl FakeBackend {
         let envelope = envelope(uid, subject, self.modseq);
         self.folder_mut(folder).unwrap().push(envelope);
         uid
+    }
+
+    fn set_body(&mut self, folder: &str, uid: u32, raw: &[u8]) {
+        self.bodies.push(((folder.to_string(), uid), raw.to_vec()));
     }
 
     fn mark_seen(&mut self, folder: &str, uid: u32) {
@@ -228,8 +235,12 @@ impl MailBackend for FakeBackend {
         Ok(FolderDelta { changed, vanished })
     }
 
-    async fn fetch_message(&mut self, _folder: &str, _uid: u32) -> Result<Vec<u8>> {
-        Err(MailError::Protocol("unsupported".to_string()))
+    async fn fetch_message(&mut self, folder: &str, uid: u32) -> Result<Vec<u8>> {
+        self.bodies
+            .iter()
+            .find(|((name, candidate), _)| name == folder && *candidate == uid)
+            .map(|(_, raw)| raw.clone())
+            .ok_or_else(|| MailError::Protocol(format!("no body {uid} in {folder}")))
     }
 
     async fn set_flags(&mut self, _folder: &str, _uids: &[u32], _change: FlagChange) -> Result<()> {
@@ -289,6 +300,26 @@ async fn folder_record(store: &Store, account_id: i64, name: &str) -> store::Fol
         .find(|folder| folder.name == name)
         .unwrap()
 }
+
+const MULTIPART: &str = concat!(
+    "From: Sender <sender@example.org>\r\n",
+    "To: me@example.org\r\n",
+    "Subject: greeting\r\n",
+    "MIME-Version: 1.0\r\n",
+    "Content-Type: multipart/mixed; boundary=\"BOUND\"\r\n",
+    "\r\n",
+    "--BOUND\r\n",
+    "Content-Type: text/plain; charset=\"utf-8\"\r\n",
+    "\r\n",
+    "Hello world\r\n",
+    "--BOUND\r\n",
+    "Content-Type: application/pdf; name=\"doc.pdf\"\r\n",
+    "Content-Disposition: attachment; filename=\"doc.pdf\"\r\n",
+    "Content-Transfer-Encoding: base64\r\n",
+    "\r\n",
+    "SGVsbG8=\r\n",
+    "--BOUND--\r\n",
+);
 
 #[test]
 fn envelope_window_selects_newest() {
@@ -453,4 +484,34 @@ async fn uidvalidity_change_invalidates_and_resyncs() {
         folder_record(&store, account_id, "INBOX").await.uidvalidity,
         Some(2)
     );
+}
+
+#[tokio::test]
+async fn fetch_body_stores_raw_and_attachments() {
+    let mut backend = FakeBackend::new(&[("INBOX", 1)]);
+    let (store, account_id) = open_store(&mut backend).await;
+    let inbox_id = folder_record(&store, account_id, "INBOX").await.id.unwrap();
+    backend.set_body("INBOX", 1, MULTIPART.as_bytes());
+
+    let dir = TempDir::new().unwrap();
+    let fetch = fetch_body(&mut backend, &store, "INBOX", inbox_id, 1, dir.path())
+        .await
+        .unwrap();
+    assert_eq!(fetch.attachments, 1);
+
+    let raw = std::fs::read(&fetch.raw_path).unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("doc.pdf"));
+
+    let message = store.message(inbox_id, 1).await.unwrap().unwrap();
+    assert_eq!(message.body_state, store::BodyState::Full);
+    assert!(message.has_attach);
+    assert_eq!(
+        message.raw_path.as_deref(),
+        Some(fetch.raw_path.to_str().unwrap())
+    );
+
+    let attachments = store.attachments(fetch.message_id).await.unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].filename.as_deref(), Some("doc.pdf"));
+    assert_eq!(attachments[0].mime_type.as_deref(), Some("application/pdf"));
 }

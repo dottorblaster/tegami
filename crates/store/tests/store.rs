@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use store::{
-    AccountRecord, AccountSource, AuthKind, BodyState, FLAG_FLAGGED, FLAG_SEEN, FolderRecord,
-    MessageRecord, Security, SpecialUse, Store, bits_to_flags, flags_to_bits,
+    AccountRecord, AccountSource, AttachmentRecord, AuthKind, BodyState, FLAG_FLAGGED, FLAG_SEEN,
+    FolderRecord, MessageRecord, Security, SpecialUse, Store, bits_to_flags, flags_to_bits,
 };
 use tempfile::TempDir;
 
@@ -288,4 +288,57 @@ async fn folder_state_and_message_deletion() {
 
     store.clear_messages(folder_id).await.unwrap();
     assert!(store.message_uids(folder_id).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stores_message_body_and_attachments() {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    let message_id = store.upsert_message(message(folder_id, 1)).await.unwrap();
+
+    store
+        .set_message_body(
+            folder_id,
+            1,
+            "/tmp/1.eml".to_string(),
+            BodyState::Full,
+            true,
+        )
+        .await
+        .unwrap();
+
+    let stored = store.message(folder_id, 1).await.unwrap().unwrap();
+    assert_eq!(stored.raw_path.as_deref(), Some("/tmp/1.eml"));
+    assert_eq!(stored.body_state, BodyState::Full);
+    assert!(stored.has_attach);
+
+    store
+        .replace_attachments(
+            message_id,
+            vec![AttachmentRecord {
+                id: None,
+                message_id,
+                part_id: "0".to_string(),
+                filename: Some("doc.pdf".to_string()),
+                mime_type: Some("application/pdf".to_string()),
+                size: Some(5),
+                content_id: None,
+                disk_path: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+    let attachments = store.attachments(message_id).await.unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0].filename.as_deref(), Some("doc.pdf"));
+    assert_eq!(attachments[0].mime_type.as_deref(), Some("application/pdf"));
+    assert_eq!(attachments[0].size, Some(5));
+
+    store
+        .replace_attachments(message_id, Vec::new())
+        .await
+        .unwrap();
+    assert!(store.attachments(message_id).await.unwrap().is_empty());
 }

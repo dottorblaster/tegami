@@ -15,7 +15,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{StoreError, StoreResult};
 use crate::models::{
-    ACCOUNT_COLUMNS, AccountRecord, FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord,
+    ACCOUNT_COLUMNS, ATTACHMENT_COLUMNS, AccountRecord, AttachmentRecord, BodyState,
+    FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord,
 };
 use crate::schema;
 
@@ -77,6 +78,23 @@ enum Command {
     UpsertMessages {
         messages: Vec<MessageRecord>,
         reply: oneshot::Sender<StoreResult<()>>,
+    },
+    SetMessageBody {
+        folder_id: i64,
+        uid: u32,
+        raw_path: String,
+        body_state: BodyState,
+        has_attach: bool,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    ReplaceAttachments {
+        message_id: i64,
+        attachments: Vec<AttachmentRecord>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    Attachments {
+        message_id: i64,
+        reply: oneshot::Sender<StoreResult<Vec<AttachmentRecord>>>,
     },
     SetMessageFlags {
         folder_id: i64,
@@ -196,6 +214,49 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn set_message_body(
+        &self,
+        folder_id: i64,
+        uid: u32,
+        raw_path: String,
+        body_state: BodyState,
+        has_attach: bool,
+    ) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::SetMessageBody {
+            folder_id,
+            uid,
+            raw_path,
+            body_state,
+            has_attach,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn replace_attachments(
+        &self,
+        message_id: i64,
+        attachments: Vec<AttachmentRecord>,
+    ) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::ReplaceAttachments {
+            message_id,
+            attachments,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn attachments(&self, message_id: i64) -> StoreResult<Vec<AttachmentRecord>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::Attachments { message_id, reply })
+            .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn messages(&self, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::Messages { folder_id, reply }).await?;
@@ -298,6 +359,35 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
             } => reply_send(reply, delete_messages(&connection, folder_id, &uids)),
             Command::ClearMessages { folder_id, reply } => {
                 reply_send(reply, clear_messages(&connection, folder_id))
+            }
+            Command::SetMessageBody {
+                folder_id,
+                uid,
+                raw_path,
+                body_state,
+                has_attach,
+                reply,
+            } => reply_send(
+                reply,
+                set_message_body(
+                    &connection,
+                    folder_id,
+                    uid,
+                    &raw_path,
+                    body_state,
+                    has_attach,
+                ),
+            ),
+            Command::ReplaceAttachments {
+                message_id,
+                attachments,
+                reply,
+            } => reply_send(
+                reply,
+                replace_attachments(&mut connection, message_id, &attachments),
+            ),
+            Command::Attachments { message_id, reply } => {
+                reply_send(reply, attachments(&connection, message_id))
             }
             Command::Messages { folder_id, reply } => {
                 reply_send(reply, messages(&connection, folder_id))
@@ -518,6 +608,62 @@ fn delete_messages(connection: &Connection, folder_id: i64, uids: &[u32]) -> Sto
 fn clear_messages(connection: &Connection, folder_id: i64) -> StoreResult<()> {
     connection.execute("DELETE FROM message WHERE folder_id = ?1", [folder_id])?;
     Ok(())
+}
+
+fn set_message_body(
+    connection: &Connection,
+    folder_id: i64,
+    uid: u32,
+    raw_path: &str,
+    body_state: BodyState,
+    has_attach: bool,
+) -> StoreResult<()> {
+    connection.execute(
+        "UPDATE message SET raw_path = ?1, body_state = ?2, has_attach = ?3 WHERE folder_id = ?4 AND uid = ?5",
+        rusqlite::params![raw_path, body_state.as_str(), has_attach, folder_id, uid],
+    )?;
+    Ok(())
+}
+
+fn replace_attachments(
+    connection: &mut Connection,
+    message_id: i64,
+    attachments: &[AttachmentRecord],
+) -> StoreResult<()> {
+    let transaction = connection.transaction()?;
+    transaction.execute("DELETE FROM attachment WHERE message_id = ?1", [message_id])?;
+    for attachment in attachments {
+        upsert_attachment(&transaction, attachment)?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn upsert_attachment(connection: &Connection, attachment: &AttachmentRecord) -> StoreResult<i64> {
+    connection.execute(
+        "INSERT INTO attachment (message_id, part_id, filename, mime_type, size, content_id, disk_path)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            attachment.message_id,
+            attachment.part_id,
+            attachment.filename,
+            attachment.mime_type,
+            attachment.size,
+            attachment.content_id,
+            attachment.disk_path,
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+fn attachments(connection: &Connection, message_id: i64) -> StoreResult<Vec<AttachmentRecord>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {ATTACHMENT_COLUMNS} FROM attachment WHERE message_id = ?1 ORDER BY id"
+    ))?;
+    let rows = statement
+        .query_map([message_id], AttachmentRecord::from_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 fn messages(connection: &Connection, folder_id: i64) -> StoreResult<Vec<MessageRecord>> {
