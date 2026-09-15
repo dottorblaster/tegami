@@ -586,3 +586,33 @@ async fn folder_lookup_by_id() {
 
     assert!(store.folder(folder_id + 1).await.unwrap().is_none());
 }
+
+#[tokio::test]
+async fn upsert_account_returns_existing_id_after_reopen() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("tegami.db");
+
+    let store = Store::open(&path).unwrap();
+    let id = store.upsert_account(account()).await.unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(reopened.upsert_account(account()).await.unwrap(), id);
+}
+
+#[tokio::test]
+async fn upsert_folder_returns_existing_id_after_reopen() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("tegami.db");
+
+    let store = Store::open(&path).unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.upsert_folder(folder(account_id)).await.unwrap(),
+        folder_id
+    );
+}

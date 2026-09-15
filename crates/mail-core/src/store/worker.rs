@@ -564,30 +564,33 @@ fn account(
 }
 
 fn upsert_account(connection: &Connection, account: &AccountRecord) -> StoreResult<i64> {
-    connection.execute(
-        "INSERT INTO account (source, external_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, auth_kind, username)
+    connection
+        .query_row(
+            "INSERT INTO account (source, external_id, email, display_name, imap_host, imap_port, imap_security, smtp_host, smtp_port, smtp_security, auth_kind, username)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(source, external_id) DO UPDATE SET
            email = excluded.email, display_name = excluded.display_name,
            imap_host = excluded.imap_host, imap_port = excluded.imap_port, imap_security = excluded.imap_security,
            smtp_host = excluded.smtp_host, smtp_port = excluded.smtp_port, smtp_security = excluded.smtp_security,
-           auth_kind = excluded.auth_kind, username = excluded.username",
-        rusqlite::params![
-            account.source.as_str(),
-            account.external_id,
-            account.email,
-            account.display_name,
-            account.imap_host,
-            account.imap_port,
-            account.imap_security.map(|value| value.as_str()),
-            account.smtp_host,
-            account.smtp_port,
-            account.smtp_security.map(|value| value.as_str()),
-            account.auth_kind.as_str(),
-            account.username,
-        ],
-    )?;
-    Ok(connection.last_insert_rowid())
+           auth_kind = excluded.auth_kind, username = excluded.username
+         RETURNING id",
+            rusqlite::params![
+                account.source.as_str(),
+                account.external_id,
+                account.email,
+                account.display_name,
+                account.imap_host,
+                account.imap_port,
+                account.imap_security.map(|value| value.as_str()),
+                account.smtp_host,
+                account.smtp_port,
+                account.smtp_security.map(|value| value.as_str()),
+                account.auth_kind.as_str(),
+                account.username,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn folders(connection: &Connection, account_id: i64) -> StoreResult<Vec<FolderRecord>> {
@@ -612,27 +615,30 @@ fn folder(connection: &Connection, folder_id: i64) -> StoreResult<Option<FolderR
 }
 
 fn upsert_folder(connection: &Connection, folder: &FolderRecord) -> StoreResult<i64> {
-    connection.execute(
-        "INSERT INTO folder (account_id, name, display_name, special_use, uidvalidity, uidnext, highestmodseq, unread_count, total_count, subscribed)
+    connection
+        .query_row(
+            "INSERT INTO folder (account_id, name, display_name, special_use, uidvalidity, uidnext, highestmodseq, unread_count, total_count, subscribed)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(account_id, name) DO UPDATE SET
            display_name = excluded.display_name, special_use = excluded.special_use,
            uidvalidity = excluded.uidvalidity, uidnext = excluded.uidnext, highestmodseq = excluded.highestmodseq,
-           unread_count = excluded.unread_count, total_count = excluded.total_count, subscribed = excluded.subscribed",
-        rusqlite::params![
-            folder.account_id,
-            folder.name,
-            folder.display_name,
-            folder.special_use.map(|value| value.as_str()),
-            folder.uidvalidity,
-            folder.uidnext,
-            folder.highestmodseq,
-            folder.unread_count,
-            folder.total_count,
-            folder.subscribed,
-        ],
-    )?;
-    Ok(connection.last_insert_rowid())
+           unread_count = excluded.unread_count, total_count = excluded.total_count, subscribed = excluded.subscribed
+         RETURNING id",
+            rusqlite::params![
+                folder.account_id,
+                folder.name,
+                folder.display_name,
+                folder.special_use.map(|value| value.as_str()),
+                folder.uidvalidity,
+                folder.uidnext,
+                folder.highestmodseq,
+                folder.unread_count,
+                folder.total_count,
+                folder.subscribed,
+            ],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn sync_folders(

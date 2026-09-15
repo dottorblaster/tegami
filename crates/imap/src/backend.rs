@@ -105,7 +105,11 @@ impl MailBackend for ImapBackend {
 
         let client = if imap.use_ssl {
             let stream = connector.connect(server_name, tcp).await?;
-            Client::new(Box::new(stream) as Stream)
+            let mut client = Client::new(Box::new(stream) as Stream);
+            if client.read_response().await?.is_none() {
+                return Err(MailError::Disconnected);
+            }
+            client
         } else {
             let mut client = Client::new(Box::new(tcp) as Stream);
             if client.read_response().await?.is_none() {

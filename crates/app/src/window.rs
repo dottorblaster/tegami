@@ -105,6 +105,7 @@ impl SimpleComponent for Window {
                                 pack_start = &gtk::ToggleButton {
                                     set_icon_name: "sidebar-show-symbolic",
                                     set_tooltip_text: Some("Show folders"),
+                                    set_active: true,
                                 },
                             },
 
