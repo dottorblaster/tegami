@@ -4,9 +4,9 @@
 //! Conversation view.
 //!
 //! Renders every message of a thread as a card. Read messages start
-//! collapsed, unread ones expand, and the quoted tail of a body is hidden
-//! behind a toggle. Bodies are fetched lazily and rendered as plain text;
-//! the rich HTML renderer replaces [`body_text`] later.
+//! collapsed, unread ones expand, and the quoted tail of a plain-text body is
+//! hidden behind a toggle. Bodies are fetched lazily and rendered as HTML in a
+//! WebKitGTK view when available, falling back to plain text.
 
 use std::sync::Arc;
 
@@ -18,6 +18,7 @@ use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use tracing::debug;
 
+use crate::html_view;
 use crate::message_text::{display_sender, display_subject, format_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,12 +28,19 @@ enum BodyStatus {
     Unavailable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyView {
+    Html,
+    Plain,
+}
+
 #[derive(Debug, Clone)]
 pub struct BodyFields {
     status: BodyStatus,
     head: String,
     quote: String,
     has_quote: bool,
+    html: Option<String>,
 }
 
 impl BodyFields {
@@ -42,6 +50,7 @@ impl BodyFields {
             head: String::new(),
             quote: String::new(),
             has_quote: false,
+            html: None,
         }
     }
 
@@ -51,6 +60,7 @@ impl BodyFields {
             head: String::new(),
             quote: String::new(),
             has_quote: false,
+            html: None,
         }
     }
 }
@@ -67,6 +77,7 @@ pub struct MessageCard {
     has_attach: bool,
     expanded: bool,
     quote_visible: bool,
+    view: BodyView,
     body: BodyFields,
 }
 
@@ -74,6 +85,8 @@ pub struct MessageCard {
 pub enum MessageCardMsg {
     Toggle,
     ToggleQuote,
+    ToggleView,
+    Refresh,
     SetBody { body: BodyFields, has_attach: bool },
 }
 
@@ -165,53 +178,93 @@ impl FactoryComponent for MessageCard {
                 #[watch]
                 set_visible: self.expanded,
 
-                gtk::Spinner {
-                    set_spinning: true,
-                    set_halign: gtk::Align::Center,
-                    #[watch]
-                    set_visible: self.body.status == BodyStatus::Pending,
-                },
+                gtk::Stack {
+                    set_hexpand: true,
+                    #[watch(skip_init)]
+                    set_visible_child_name: self.body_page(),
 
-                gtk::Label {
-                    set_xalign: 0.0,
-                    set_wrap: true,
-                    set_selectable: true,
-                    set_label: "No plain-text body available.",
-                    add_css_class: "dim-label",
-                    #[watch]
-                    set_visible: self.body.status == BodyStatus::Unavailable,
-                },
+                    add_named[Some("pending")] = &gtk::Box {
+                        set_halign: gtk::Align::Center,
+                        set_valign: gtk::Align::Center,
 
-                gtk::Label {
-                    set_xalign: 0.0,
-                    set_wrap: true,
-                    set_selectable: true,
-                    add_css_class: "conversation-body",
-                    #[watch]
-                    set_label: &self.body.head,
-                    #[watch]
-                    set_visible: self.body.status == BodyStatus::Ready,
-                },
+                        gtk::Spinner {
+                            set_spinning: true,
+                        },
+                    },
 
-                gtk::Label {
-                    set_xalign: 0.0,
-                    set_wrap: true,
-                    set_selectable: true,
-                    add_css_class: "conversation-quote",
-                    #[watch]
-                    set_label: &self.body.quote,
-                    #[watch]
-                    set_visible: self.body.has_quote && self.quote_visible,
-                },
+                    add_named[Some("unavailable")] = &gtk::Label {
+                        set_xalign: 0.0,
+                        set_wrap: true,
+                        set_selectable: true,
+                        set_label: "No body available.",
+                        add_css_class: "dim-label",
+                    },
 
-                gtk::Button {
-                    set_halign: gtk::Align::Start,
-                    set_label: "Show quoted text",
-                    add_css_class: "flat",
-                    add_css_class: "conversation-quote-toggle",
-                    #[watch]
-                    set_visible: self.body.has_quote && !self.quote_visible,
-                    connect_clicked[sender] => move |_| sender.input(MessageCardMsg::ToggleQuote),
+                    add_named[Some("plain")] = &gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 6,
+                        set_hexpand: true,
+
+                        gtk::Label {
+                            set_xalign: 0.0,
+                            set_wrap: true,
+                            set_selectable: true,
+                            add_css_class: "conversation-body",
+                            #[watch]
+                            set_label: &self.body.head,
+                        },
+
+                        gtk::Label {
+                            set_xalign: 0.0,
+                            set_wrap: true,
+                            set_selectable: true,
+                            add_css_class: "conversation-quote",
+                            #[watch]
+                            set_label: &self.body.quote,
+                            #[watch]
+                            set_visible: self.body.has_quote && self.quote_visible,
+                        },
+
+                        gtk::Button {
+                            set_halign: gtk::Align::Start,
+                            set_label: "Show quoted text",
+                            add_css_class: "flat",
+                            add_css_class: "conversation-quote-toggle",
+                            #[watch]
+                            set_visible: self.body.has_quote && !self.quote_visible,
+                            connect_clicked[sender] => move |_| sender.input(MessageCardMsg::ToggleQuote),
+                        },
+
+                        gtk::Button {
+                            set_halign: gtk::Align::Start,
+                            set_label: "Show rich text",
+                            add_css_class: "flat",
+                            add_css_class: "conversation-view-toggle",
+                            #[watch]
+                            set_visible: self.body.html.is_some(),
+                            connect_clicked[sender] => move |_| sender.input(MessageCardMsg::ToggleView),
+                        },
+                    },
+
+                    add_named[Some("html")] = &gtk::Box {
+                        set_orientation: gtk::Orientation::Vertical,
+                        set_spacing: 6,
+                        set_hexpand: true,
+
+                        #[name(html_slot)]
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_hexpand: true,
+                        },
+
+                        gtk::Button {
+                            set_halign: gtk::Align::Start,
+                            set_label: "Show plain text",
+                            add_css_class: "flat",
+                            add_css_class: "conversation-view-toggle",
+                            connect_clicked[sender] => move |_| sender.input(MessageCardMsg::ToggleView),
+                        },
+                    },
                 },
             },
         }
@@ -225,10 +278,39 @@ impl FactoryComponent for MessageCard {
         match msg {
             MessageCardMsg::Toggle => self.expanded = !self.expanded,
             MessageCardMsg::ToggleQuote => self.quote_visible = !self.quote_visible,
+            MessageCardMsg::ToggleView => self.view = self.view.other(),
+            MessageCardMsg::Refresh => {}
             MessageCardMsg::SetBody { body, has_attach } => {
+                self.view = if body.html.is_some() {
+                    BodyView::Html
+                } else {
+                    BodyView::Plain
+                };
                 self.body = body;
                 self.has_attach = has_attach;
             }
+        }
+    }
+
+    fn post_view(&self, _sender: FactorySender<Self>) {
+        if !self.expanded
+            || self.view != BodyView::Html
+            || self.body.status != BodyStatus::Ready
+            || html_slot.first_child().is_some()
+        {
+            return;
+        }
+        if let Some(html) = self.body.html.as_deref() {
+            html_slot.append(&html_view::new_webview(html));
+        }
+    }
+}
+
+impl BodyView {
+    fn other(&self) -> Self {
+        match self {
+            Self::Html => Self::Plain,
+            Self::Plain => Self::Html,
         }
     }
 }
@@ -248,6 +330,19 @@ impl MessageCard {
         } else {
             "pan-down-symbolic"
         }
+    }
+
+    fn body_page(&self) -> &'static str {
+        page_for(&self.body, self.view)
+    }
+}
+
+fn page_for(body: &BodyFields, view: BodyView) -> &'static str {
+    match body.status {
+        BodyStatus::Pending => "pending",
+        BodyStatus::Unavailable => "unavailable",
+        BodyStatus::Ready if view == BodyView::Html && body.html.is_some() => "html",
+        BodyStatus::Ready => "plain",
     }
 }
 
@@ -424,6 +519,9 @@ impl SimpleComponent for Conversation {
                             guard.push_back(card);
                         }
                         drop(guard);
+                        for index in 0..self.list.len() {
+                            self.list.send(index, MessageCardMsg::Refresh);
+                        }
                         self.state = ViewState::Ready;
                         for (folder_id, uid) in pending {
                             let _ = sender.output(ConversationOutput::FetchBody { folder_id, uid });
@@ -512,6 +610,7 @@ async fn message_card(record: &MessageRecord, now: &glib::DateTime) -> MessageCa
     let flags = bits_to_flags(record.flags);
     let unread = !flags.seen;
     let timestamp = record.date_sent.or(record.date_recv);
+    let body = body_fields(record).await;
     MessageCard {
         message_id: record.id.unwrap_or_default(),
         folder_id: record.folder_id,
@@ -525,7 +624,12 @@ async fn message_card(record: &MessageRecord, now: &glib::DateTime) -> MessageCa
         has_attach: record.has_attach,
         expanded: unread,
         quote_visible: false,
-        body: body_fields(record).await,
+        view: if body.html.is_some() {
+            BodyView::Html
+        } else {
+            BodyView::Plain
+        },
+        body,
     }
 }
 
@@ -540,19 +644,30 @@ async fn body_fields(record: &MessageRecord) -> BodyFields {
         return BodyFields::unavailable();
     };
     match mail_core::mime::parse(&raw) {
-        Some(parsed) => match parsed.text {
-            Some(text) if !text.trim().is_empty() => {
-                let (head, quote) = split_quote(&text);
-                let has_quote = quote.is_some();
-                BodyFields {
-                    status: BodyStatus::Ready,
-                    head,
-                    quote: quote.unwrap_or_default(),
-                    has_quote,
+        Some(parsed) => {
+            let html = parsed.html.filter(|html| !html.trim().is_empty());
+            match parsed.text {
+                Some(text) if !text.trim().is_empty() => {
+                    let (head, quote) = split_quote(&text);
+                    let has_quote = quote.is_some();
+                    BodyFields {
+                        status: BodyStatus::Ready,
+                        head,
+                        quote: quote.unwrap_or_default(),
+                        has_quote,
+                        html,
+                    }
                 }
+                _ if html.is_some() => BodyFields {
+                    status: BodyStatus::Ready,
+                    head: String::new(),
+                    quote: String::new(),
+                    has_quote: false,
+                    html,
+                },
+                _ => BodyFields::unavailable(),
             }
-            _ => BodyFields::unavailable(),
-        },
+        }
         None => BodyFields::unavailable(),
     }
 }
@@ -615,5 +730,44 @@ mod tests {
         assert_eq!(ViewState::Empty.page_name(), "empty");
         assert_eq!(ViewState::Ready.page_name(), "messages");
         assert_eq!(ViewState::Error.page_name(), "error");
+    }
+
+    fn ready_body(html: Option<&str>) -> BodyFields {
+        BodyFields {
+            status: BodyStatus::Ready,
+            head: "Hello".to_string(),
+            quote: String::new(),
+            has_quote: false,
+            html: html.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn body_page_prefers_html_and_falls_back_to_plain() {
+        assert_eq!(page_for(&ready_body(None), BodyView::Html), "plain");
+        assert_eq!(page_for(&ready_body(None), BodyView::Plain), "plain");
+        assert_eq!(
+            page_for(&ready_body(Some("<p>hi</p>")), BodyView::Html),
+            "html"
+        );
+        assert_eq!(
+            page_for(&ready_body(Some("<p>hi</p>")), BodyView::Plain),
+            "plain"
+        );
+    }
+
+    #[test]
+    fn body_page_covers_pending_and_unavailable() {
+        assert_eq!(page_for(&BodyFields::pending(), BodyView::Html), "pending");
+        assert_eq!(
+            page_for(&BodyFields::unavailable(), BodyView::Plain),
+            "unavailable"
+        );
+    }
+
+    #[test]
+    fn body_view_toggles_between_modes() {
+        assert_eq!(BodyView::Html.other(), BodyView::Plain);
+        assert_eq!(BodyView::Plain.other(), BodyView::Html);
     }
 }

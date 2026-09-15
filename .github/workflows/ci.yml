@@ -43,7 +43,7 @@ jobs:
           components: clippy
       - name: Install test dependencies
         run: |
-          dnf install --assumeyes --quiet dbus-daemon cpio
+          dnf install --assumeyes --quiet dbus-daemon cpio webkitgtk6.0 webkitgtk6.0-devel
           cd /
           dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
           rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
@@ -75,7 +75,7 @@ jobs:
           toolchain: "1.93"
       - name: Install introspection data
         run: |
-          dnf install --assumeyes --quiet cpio
+          dnf install --assumeyes --quiet cpio webkitgtk6.0 webkitgtk6.0-devel
           cd /
           dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
           rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'
@@ -106,7 +106,7 @@ jobs:
           toolchain: stable
       - name: Install introspection data
         run: |
-          dnf install --assumeyes --quiet cpio
+          dnf install --assumeyes --quiet cpio webkitgtk6.0 webkitgtk6.0-devel
           cd /
           dnf download --assumeyes --arch x86_64 libadwaita libadwaita-devel
           rpm2cpio libadwaita-devel-1*.rpm | cpio -id './usr/share/gir-1.0/*'

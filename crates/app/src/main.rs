@@ -4,6 +4,7 @@
 mod application;
 mod config;
 mod conversation;
+mod html_view;
 mod logging;
 mod message_list;
 mod message_text;

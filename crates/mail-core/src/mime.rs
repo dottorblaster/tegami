@@ -1,7 +1,7 @@
 // Copyright (C) 2026 Tegami contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use mail_parser::{ContentType, MessageParser, MessagePart, MimeHeaders};
+use mail_parser::{ContentType, Message, MessageParser, MessagePart, MimeHeaders, PartType};
 
 pub struct Attachment {
     pub part_id: String,
@@ -22,13 +22,24 @@ pub fn parse(raw: &[u8]) -> Option<ParsedMessage> {
     let message = MessageParser::default().parse(raw)?;
     Some(ParsedMessage {
         text: message.body_text(0).map(|body| body.into_owned()),
-        html: message.body_html(0).map(|body| body.into_owned()),
+        html: genuine_html(&message),
         attachments: message
             .attachments()
             .enumerate()
             .map(|(index, part)| attachment(index, part))
             .collect(),
     })
+}
+
+fn genuine_html(message: &Message<'_>) -> Option<String> {
+    message
+        .html_body
+        .first()
+        .and_then(|&index| message.parts.get(index as usize))
+        .and_then(|part| match &part.body {
+            PartType::Html(html) => Some(html.as_ref().to_owned()),
+            _ => None,
+        })
 }
 
 fn attachment(index: usize, part: &MessagePart<'_>) -> Attachment {
@@ -80,12 +91,6 @@ mod tests {
     fn parses_bodies_and_attachments() {
         let parsed = parse(MULTIPART.as_bytes()).unwrap();
         assert_eq!(parsed.text.as_deref().map(str::trim), Some("Hello world"));
-        assert!(
-            parsed
-                .html
-                .as_deref()
-                .is_some_and(|html| html.contains("Hello world"))
-        );
         assert_eq!(parsed.attachments.len(), 1);
 
         let attachment = &parsed.attachments[0];
@@ -95,6 +100,35 @@ mod tests {
         assert_eq!(attachment.size, 5);
         assert_eq!(attachment.data, b"Hello");
         assert_eq!(attachment.content_id, None);
+        assert!(parsed.html.is_none());
+    }
+
+    const HTML_MESSAGE: &str = concat!(
+        "From: Sender <sender@example.org>\r\n",
+        "To: me@example.org\r\n",
+        "Subject: rich message\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/alternative; boundary=\"ALT\"\r\n",
+        "\r\n",
+        "--ALT\r\n",
+        "Content-Type: text/plain; charset=\"utf-8\"\r\n",
+        "\r\n",
+        "Hello world\r\n",
+        "--ALT\r\n",
+        "Content-Type: text/html; charset=\"utf-8\"\r\n",
+        "\r\n",
+        "<html><body><p>Hello <b>world</b></p></body></html>\r\n",
+        "--ALT--\r\n",
+    );
+
+    #[test]
+    fn keeps_only_the_genuine_html_part() {
+        let parsed = parse(HTML_MESSAGE.as_bytes()).unwrap();
+        assert_eq!(parsed.text.as_deref().map(str::trim), Some("Hello world"));
+        assert_eq!(
+            parsed.html.as_deref().map(str::trim),
+            Some("<html><body><p>Hello <b>world</b></p></body></html>")
+        );
     }
 
     #[test]
@@ -102,6 +136,7 @@ mod tests {
         let raw = "From: a@example.org\r\nSubject: hi\r\n\r\nbody line\r\n";
         let parsed = parse(raw.as_bytes()).unwrap();
         assert_eq!(parsed.text.as_deref().map(str::trim), Some("body line"));
+        assert!(parsed.html.is_none());
         assert!(parsed.attachments.is_empty());
     }
 }
