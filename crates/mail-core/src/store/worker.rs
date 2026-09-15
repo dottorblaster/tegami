@@ -20,6 +20,7 @@ use super::models::{
     PendingOpRecord, SearchHit,
 };
 use super::schema;
+use crate::threading::{self, ThreadMessage};
 
 enum Command {
     Accounts(oneshot::Sender<StoreResult<Vec<AccountRecord>>>),
@@ -71,6 +72,10 @@ enum Command {
         folder_id: i64,
         uid: u32,
         reply: oneshot::Sender<StoreResult<Option<MessageRecord>>>,
+    },
+    ThreadMessages {
+        thread_id: i64,
+        reply: oneshot::Sender<StoreResult<Vec<MessageRecord>>>,
     },
     UpsertMessage {
         message: MessageRecord,
@@ -345,6 +350,13 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn thread_messages(&self, thread_id: i64) -> StoreResult<Vec<MessageRecord>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::ThreadMessages { thread_id, reply })
+            .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn upsert_message(&self, message: MessageRecord) -> StoreResult<i64> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::UpsertMessage { message, reply }).await?;
@@ -483,8 +495,11 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
                 uid,
                 reply,
             } => reply_send(reply, message(&connection, folder_id, uid)),
+            Command::ThreadMessages { thread_id, reply } => {
+                reply_send(reply, thread_messages(&connection, thread_id))
+            }
             Command::UpsertMessage { message, reply } => {
-                reply_send(reply, upsert_message(&connection, &message))
+                reply_send(reply, upsert_message(&mut connection, &message))
             }
             Command::UpsertMessages { messages, reply } => {
                 reply_send(reply, upsert_messages(&mut connection, &messages))
@@ -830,7 +845,18 @@ fn message(
         .map_err(Into::into)
 }
 
-fn upsert_message(connection: &Connection, message: &MessageRecord) -> StoreResult<i64> {
+fn thread_messages(connection: &Connection, thread_id: i64) -> StoreResult<Vec<MessageRecord>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {MESSAGE_COLUMNS} FROM message WHERE thread_id = ?1 \
+         ORDER BY COALESCE(date_recv, 0), uid"
+    ))?;
+    let rows = statement
+        .query_map([thread_id], MessageRecord::from_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn insert_message(connection: &Connection, message: &MessageRecord) -> StoreResult<i64> {
     let message_id = connection.query_row(
         "INSERT INTO message (folder_id, uid, modseq, message_id, thread_id, subject, from_addr, from_name, to_addrs, cc_addrs, date_sent, date_recv, in_reply_to, refs, flags, has_attach, size, structure, raw_path, body_state)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
@@ -936,13 +962,62 @@ fn search(connection: &Connection, query: &str, limit: i64) -> StoreResult<Vec<S
     Ok(hits)
 }
 
+fn upsert_message(connection: &mut Connection, message: &MessageRecord) -> StoreResult<i64> {
+    let message_id = insert_message(connection, message)?;
+    rethread(connection)?;
+    Ok(message_id)
+}
+
 fn upsert_messages(connection: &mut Connection, messages: &[MessageRecord]) -> StoreResult<()> {
     let transaction = connection.transaction()?;
     for message in messages {
-        upsert_message(&transaction, message)?;
+        insert_message(&transaction, message)?;
+    }
+    transaction.commit()?;
+    rethread(connection)
+}
+
+fn rethread(connection: &mut Connection) -> StoreResult<()> {
+    let (messages, current) = thread_inputs(connection)?;
+    if messages.is_empty() {
+        return Ok(());
+    }
+    let roots = threading::thread_roots(&messages);
+    let transaction = connection.transaction()?;
+    {
+        let mut statement =
+            transaction.prepare("UPDATE message SET thread_id = ?1 WHERE id = ?2")?;
+        for (index, message) in messages.iter().enumerate() {
+            if current[index] != Some(roots[index]) {
+                statement.execute(rusqlite::params![roots[index], message.id])?;
+            }
+        }
     }
     transaction.commit()?;
     Ok(())
+}
+
+fn thread_inputs(connection: &Connection) -> StoreResult<(Vec<ThreadMessage>, Vec<Option<i64>>)> {
+    let mut statement = connection.prepare(
+        "SELECT m.id, f.account_id, m.message_id, m.in_reply_to, m.refs, m.subject, m.thread_id \
+         FROM message m JOIN folder f ON f.id = m.folder_id",
+    )?;
+    let rows: Vec<(ThreadMessage, Option<i64>)> = statement
+        .query_map([], |row| {
+            let references: Option<String> = row.get(4)?;
+            let message = ThreadMessage {
+                id: row.get(0)?,
+                account_id: row.get(1)?,
+                message_id: row.get(2)?,
+                in_reply_to: row.get(3)?,
+                references: threading::parse_references(references.as_deref()),
+                subject: row.get(5)?,
+            };
+            let thread_id: Option<i64> = row.get(6)?;
+            Ok((message, thread_id))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows.into_iter().unzip())
 }
 
 fn set_message_flags(

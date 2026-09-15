@@ -14,6 +14,7 @@ pub mod folder;
 pub mod mime;
 pub mod store;
 pub mod sync;
+pub mod threading;
 pub mod worker;
 
 pub use backend::{Credential, MailBackend, MailError};

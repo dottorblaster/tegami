@@ -469,3 +469,109 @@ async fn migration_backfills_fts_headers() {
         1
     );
 }
+
+async fn seeded_store() -> (Store, i64) {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    (store, folder_id)
+}
+
+async fn threaded_message(
+    store: &Store,
+    folder_id: i64,
+    uid: u32,
+    message_id: &str,
+    in_reply_to: Option<&str>,
+    references: Option<&str>,
+    subject: &str,
+) {
+    let mut record = message(folder_id, uid);
+    record.message_id = Some(message_id.to_string());
+    record.in_reply_to = in_reply_to.map(str::to_string);
+    record.refs = references.map(str::to_string);
+    record.subject = subject.to_string();
+    store.upsert_message(record).await.unwrap();
+}
+
+#[tokio::test]
+async fn replies_share_the_root_thread_id() {
+    let (store, folder_id) = seeded_store().await;
+    threaded_message(&store, folder_id, 1, "<root@x>", None, None, "Hello").await;
+    threaded_message(
+        &store,
+        folder_id,
+        2,
+        "<reply@x>",
+        Some("<root@x>"),
+        Some(r#"["<root@x>"]"#),
+        "Re: Hello",
+    )
+    .await;
+
+    let messages = store.messages(folder_id).await.unwrap();
+    let root = messages.iter().find(|message| message.uid == 1).unwrap();
+    let reply = messages.iter().find(|message| message.uid == 2).unwrap();
+    assert_eq!(root.thread_id, root.id);
+    assert_eq!(reply.thread_id, root.id);
+}
+
+#[tokio::test]
+async fn threading_links_a_child_that_arrived_before_its_parent() {
+    let (store, folder_id) = seeded_store().await;
+    threaded_message(
+        &store,
+        folder_id,
+        2,
+        "<reply@x>",
+        Some("<root@x>"),
+        Some(r#"["<root@x>"]"#),
+        "Re: Hello",
+    )
+    .await;
+    threaded_message(&store, folder_id, 1, "<root@x>", None, None, "Hello").await;
+
+    let messages = store.messages(folder_id).await.unwrap();
+    let root = messages.iter().find(|message| message.uid == 1).unwrap();
+    let reply = messages.iter().find(|message| message.uid == 2).unwrap();
+    assert_eq!(root.thread_id, root.id);
+    assert_eq!(reply.thread_id, root.id);
+}
+
+#[tokio::test]
+async fn messages_without_references_fall_back_to_the_subject() {
+    let (store, folder_id) = seeded_store().await;
+    threaded_message(&store, folder_id, 1, "<a@x>", None, None, "Lunch?").await;
+    threaded_message(&store, folder_id, 2, "<b@x>", None, None, "Re: Lunch?").await;
+
+    let messages = store.messages(folder_id).await.unwrap();
+    let thread = messages[0].thread_id;
+    assert!(thread.is_some());
+    assert!(messages.iter().all(|message| message.thread_id == thread));
+}
+
+#[tokio::test]
+async fn thread_messages_returns_the_whole_conversation() {
+    let (store, folder_id) = seeded_store().await;
+    threaded_message(&store, folder_id, 1, "<root@x>", None, None, "Hello").await;
+    threaded_message(
+        &store,
+        folder_id,
+        2,
+        "<reply@x>",
+        Some("<root@x>"),
+        Some(r#"["<root@x>"]"#),
+        "Re: Hello",
+    )
+    .await;
+    threaded_message(&store, folder_id, 3, "<other@x>", None, None, "Unrelated").await;
+
+    let root = store.message(folder_id, 1).await.unwrap().unwrap();
+    let conversation = store
+        .thread_messages(root.thread_id.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(conversation.len(), 2);
+    assert_eq!(conversation[0].uid, 1);
+    assert_eq!(conversation[1].uid, 2);
+}
