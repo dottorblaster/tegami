@@ -19,13 +19,21 @@ use tracing::debug;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderKey {
     pub account_id: i64,
+    pub folder_id: i64,
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SidebarRow {
-    Account { name: String, email: String },
-    Folder { key: FolderKey, title: String, unread: u32 },
+    Account {
+        name: String,
+        email: String,
+    },
+    Folder {
+        key: FolderKey,
+        title: String,
+        unread: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,11 +174,14 @@ impl SimpleComponent for FolderTree {
         _root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let rows = FactoryVecDeque::builder()
-            .launch_default()
-            .forward(sender.input_sender(), |msg| match msg {
-                FolderTreeOutput::Selected { key, title } => FolderTreeMsg::Selected { key, title },
-            });
+        let rows =
+            FactoryVecDeque::builder()
+                .launch_default()
+                .forward(sender.input_sender(), |msg| match msg {
+                    FolderTreeOutput::Selected { key, title } => {
+                        FolderTreeMsg::Selected { key, title }
+                    }
+                });
         let model = FolderTree { rows, store };
         let rows = model.rows.widget();
         let widgets = view_output!();
@@ -244,6 +255,7 @@ fn account_rows(account: &AccountRecord, mut folders: Vec<FolderRecord>) -> Vec<
         rows.push(SidebarRow::Folder {
             key: FolderKey {
                 account_id,
+                folder_id: folder.id.unwrap_or_default(),
                 name: folder.name.clone(),
             },
             title: folder
@@ -364,6 +376,7 @@ mod tests {
                 SidebarRow::Folder {
                     key: FolderKey {
                         account_id: 1,
+                        folder_id: 0,
                         name: "INBOX".to_string(),
                     },
                     title: "INBOX".to_string(),
@@ -372,6 +385,7 @@ mod tests {
                 SidebarRow::Folder {
                     key: FolderKey {
                         account_id: 1,
+                        folder_id: 0,
                         name: "Archive".to_string(),
                     },
                     title: "Archive".to_string(),
@@ -380,6 +394,7 @@ mod tests {
                 SidebarRow::Folder {
                     key: FolderKey {
                         account_id: 1,
+                        folder_id: 0,
                         name: "Trash".to_string(),
                     },
                     title: "Trash".to_string(),
@@ -388,6 +403,7 @@ mod tests {
                 SidebarRow::Folder {
                     key: FolderKey {
                         account_id: 1,
+                        folder_id: 0,
                         name: "Work/Receipts".to_string(),
                     },
                     title: "Work/Receipts".to_string(),

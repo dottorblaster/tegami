@@ -13,6 +13,7 @@ use tracing::debug;
 
 use crate::application::{About, Quit};
 use crate::config;
+use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
 use crate::sidebar::{FolderKey, FolderTree, FolderTreeOutput};
 
 const COLLAPSE_FOLDERS_WIDTH: f64 = 860.0;
@@ -20,12 +21,14 @@ const COLLAPSE_READING_WIDTH: f64 = 500.0;
 
 pub struct Window {
     folder_tree: Controller<FolderTree>,
+    message_list: Controller<MessageList>,
     mailbox_page_title: String,
 }
 
 #[derive(Debug)]
 pub enum WindowMsg {
     FolderSelected { key: FolderKey, title: String },
+    MessageSelected { folder_id: i64, uid: u32 },
 }
 
 #[relm4::component(pub)]
@@ -99,6 +102,12 @@ impl SimpleComponent for Window {
                                 set_orientation: gtk::Orientation::Vertical,
                                 set_hexpand: true,
                                 set_vexpand: true,
+
+                                #[local_ref]
+                                message_list -> gtk::ScrolledWindow {
+                                    set_vexpand: true,
+                                    set_hexpand: true,
+                                },
                             },
                         },
                     },
@@ -134,17 +143,30 @@ impl SimpleComponent for Window {
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let store = Arc::new(Store::open(config::store_path()).expect("failed to open mail store"));
-        let folder_tree = FolderTree::builder()
-            .launch(store)
-            .forward(sender.input_sender(), |msg| match msg {
-                FolderTreeOutput::Selected { key, title } => WindowMsg::FolderSelected { key, title },
-            });
+        let folder_tree =
+            FolderTree::builder()
+                .launch(store.clone())
+                .forward(sender.input_sender(), |msg| match msg {
+                    FolderTreeOutput::Selected { key, title } => {
+                        WindowMsg::FolderSelected { key, title }
+                    }
+                });
+        let message_list =
+            MessageList::builder()
+                .launch(store)
+                .forward(sender.input_sender(), |msg| match msg {
+                    MessageListOutput::Selected { folder_id, uid } => {
+                        WindowMsg::MessageSelected { folder_id, uid }
+                    }
+                });
         let model = Window {
             folder_tree,
+            message_list,
             mailbox_page_title: "Inbox".to_string(),
         };
 
         let folder_tree = model.folder_tree.widget();
+        let message_list = model.message_list.widget();
         let widgets = view_output!();
 
         let menu = gio::Menu::new();
@@ -166,17 +188,20 @@ impl SimpleComponent for Window {
 
         debug!("main window initialized");
 
-        ComponentParts {
-            model,
-            widgets,
-        }
+        ComponentParts { model, widgets }
     }
 
     fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
         match msg {
             WindowMsg::FolderSelected { key, title } => {
                 self.mailbox_page_title = title;
+                self.message_list.emit(MessageListMsg::Load {
+                    folder_id: key.folder_id,
+                });
                 debug!(account = key.account_id, folder = %key.name, "folder selected");
+            }
+            WindowMsg::MessageSelected { folder_id, uid } => {
+                debug!(folder_id, uid, "message selected");
             }
         }
     }

@@ -6,3 +6,40 @@
   font-weight: 600;
   font-size: 0.84em;
 }
+
+.message-list {
+  background-color: @window_bg_color;
+}
+
+.message-row {
+  padding: 10px 12px;
+}
+
+.message-row-sender {
+  font-weight: 500;
+}
+
+.message-row-subject,
+.message-row-date {
+  color: alpha(@window_fg_color, 0.6);
+}
+
+.message-row.unread .message-row-sender,
+.message-row.unread .message-row-subject {
+  font-weight: 700;
+}
+
+.message-row.unread .message-row-sender,
+.message-row.unread .message-row-subject,
+.message-row.unread .message-row-date {
+  color: @window_fg_color;
+}
+
+.message-row-date {
+  font-size: 0.85em;
+}
+
+.message-row-unread-dot {
+  color: @accent_color;
+  font-size: 0.7em;
+}

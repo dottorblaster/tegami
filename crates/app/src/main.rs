@@ -4,6 +4,7 @@
 mod application;
 mod config;
 mod logging;
+mod message_list;
 mod sidebar;
 mod window;
 
