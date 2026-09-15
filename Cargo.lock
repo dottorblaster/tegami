@@ -57,6 +57,7 @@ name = "app"
 version = "0.1.0"
 dependencies = [
  "accounts",
+ "base64",
  "imap",
  "mail-core",
  "relm4",

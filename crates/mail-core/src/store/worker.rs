@@ -139,6 +139,13 @@ enum Command {
         flags: i64,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    RemoteContentSenders {
+        reply: oneshot::Sender<StoreResult<Vec<String>>>,
+    },
+    AllowRemoteContent {
+        sender: String,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     Shutdown,
 }
 
@@ -412,6 +419,22 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn remote_content_senders(&self) -> StoreResult<Vec<String>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::RemoteContentSenders { reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn allow_remote_content(&self, sender: &str) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::AllowRemoteContent {
+            sender: normalize_sender(sender),
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     async fn send(&self, command: Command) -> StoreResult<()> {
         self.sender
             .send(command)
@@ -544,6 +567,12 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
                 reply,
                 set_message_flags(&connection, folder_id, &uids, flags),
             ),
+            Command::RemoteContentSenders { reply } => {
+                reply_send(reply, remote_content_senders(&connection))
+            }
+            Command::AllowRemoteContent { sender, reply } => {
+                reply_send(reply, allow_remote_content(&connection, &sender))
+            }
             Command::Shutdown => break,
         }
     }
@@ -552,6 +581,27 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
 
 fn reply_send<T>(reply: oneshot::Sender<T>, value: T) {
     let _ = reply.send(value);
+}
+
+fn normalize_sender(sender: &str) -> String {
+    sender.trim().to_ascii_lowercase()
+}
+
+fn remote_content_senders(connection: &Connection) -> StoreResult<Vec<String>> {
+    let mut statement =
+        connection.prepare("SELECT sender FROM remote_content_sender ORDER BY sender")?;
+    let rows = statement
+        .query_map([], |row| row.get(0))?
+        .collect::<std::result::Result<Vec<String>, _>>()?;
+    Ok(rows)
+}
+
+fn allow_remote_content(connection: &Connection, sender: &str) -> StoreResult<()> {
+    connection.execute(
+        "INSERT OR IGNORE INTO remote_content_sender (sender) VALUES (?1)",
+        [sender],
+    )?;
+    Ok(())
 }
 
 fn accounts(connection: &Connection) -> StoreResult<Vec<AccountRecord>> {

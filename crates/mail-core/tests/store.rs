@@ -644,3 +644,24 @@ async fn prune_accounts_removes_unlisted_accounts_and_cascades() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn remote_content_allowlist_round_trip() {
+    let store = Store::open(":memory:").unwrap();
+    assert!(store.remote_content_senders().await.unwrap().is_empty());
+
+    store
+        .allow_remote_content("  Ada@Lovelace.dev ")
+        .await
+        .unwrap();
+    store
+        .allow_remote_content("ada@lovelace.dev")
+        .await
+        .unwrap();
+    store.allow_remote_content("grace@navy.dev").await.unwrap();
+
+    assert_eq!(
+        store.remote_content_senders().await.unwrap(),
+        vec!["ada@lovelace.dev".to_string(), "grace@navy.dev".to_string()]
+    );
+}

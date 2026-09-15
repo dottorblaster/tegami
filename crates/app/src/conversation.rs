@@ -8,6 +8,7 @@
 //! hidden behind a toggle. Bodies are fetched lazily and rendered as HTML in a
 //! WebKitGTK view when available, falling back to plain text.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use mail_core::store::{BodyState, MessageRecord, Store, bits_to_flags};
@@ -17,8 +18,10 @@ use relm4::gtk::glib;
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use tracing::debug;
+use webkit6::WebView;
+use webkit6::prelude::WebViewExt;
 
-use crate::html_view;
+use crate::html_view::{self, InlinePart};
 use crate::message_text::{display_sender, display_subject, format_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +44,8 @@ pub struct BodyFields {
     quote: String,
     has_quote: bool,
     html: Option<String>,
+    has_remote: bool,
+    inline: Vec<InlinePart>,
 }
 
 impl BodyFields {
@@ -51,6 +56,8 @@ impl BodyFields {
             quote: String::new(),
             has_quote: false,
             html: None,
+            has_remote: false,
+            inline: Vec::new(),
         }
     }
 
@@ -61,6 +68,8 @@ impl BodyFields {
             quote: String::new(),
             has_quote: false,
             html: None,
+            has_remote: false,
+            inline: Vec::new(),
         }
     }
 }
@@ -71,6 +80,7 @@ pub struct MessageCard {
     folder_id: i64,
     uid: u32,
     sender: String,
+    sender_addr: Option<String>,
     date: String,
     subject: String,
     unread: bool,
@@ -78,6 +88,7 @@ pub struct MessageCard {
     expanded: bool,
     quote_visible: bool,
     view: BodyView,
+    remote_allowed: bool,
     body: BodyFields,
 }
 
@@ -87,14 +98,21 @@ pub enum MessageCardMsg {
     ToggleQuote,
     ToggleView,
     Refresh,
+    LoadRemoteOnce,
+    AllowSender,
     SetBody { body: BodyFields, has_attach: bool },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageCardOutput {
+    AllowSender { sender: String },
 }
 
 #[relm4::factory(pub)]
 impl FactoryComponent for MessageCard {
     type Init = MessageCard;
     type Input = MessageCardMsg;
-    type Output = ();
+    type Output = MessageCardOutput;
     type CommandOutput = ();
     type ParentWidget = gtk::Box;
 
@@ -251,6 +269,54 @@ impl FactoryComponent for MessageCard {
                         set_spacing: 6,
                         set_hexpand: true,
 
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_spacing: 6,
+                            set_margin_bottom: 6,
+                            add_css_class: "conversation-remote-banner",
+                            #[watch]
+                            set_visible: self.show_remote_banner(),
+
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 8,
+
+                                gtk::Image {
+                                    set_icon_name: Some("dialog-warning-symbolic"),
+                                    set_valign: gtk::Align::Start,
+                                    add_css_class: "dim-label",
+                                },
+
+                                gtk::Label {
+                                    set_xalign: 0.0,
+                                    set_wrap: true,
+                                    set_hexpand: true,
+                                    add_css_class: "dim-label",
+                                    set_label: "Remote content is blocked to protect your privacy.",
+                                },
+                            },
+
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Horizontal,
+                                set_spacing: 6,
+                                set_halign: gtk::Align::Start,
+
+                                gtk::Button {
+                                    set_label: "Load once",
+                                    add_css_class: "flat",
+                                    add_css_class: "conversation-view-toggle",
+                                    connect_clicked[sender] => move |_| sender.input(MessageCardMsg::LoadRemoteOnce),
+                                },
+
+                                gtk::Button {
+                                    set_label: "Always from this sender",
+                                    add_css_class: "flat",
+                                    add_css_class: "conversation-view-toggle",
+                                    connect_clicked[sender] => move |_| sender.input(MessageCardMsg::AllowSender),
+                                },
+                            },
+                        },
+
                         #[name(html_slot)]
                         gtk::Box {
                             set_orientation: gtk::Orientation::Vertical,
@@ -274,12 +340,21 @@ impl FactoryComponent for MessageCard {
         init
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: FactorySender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: FactorySender<Self>) {
         match msg {
             MessageCardMsg::Toggle => self.expanded = !self.expanded,
             MessageCardMsg::ToggleQuote => self.quote_visible = !self.quote_visible,
             MessageCardMsg::ToggleView => self.view = self.view.other(),
             MessageCardMsg::Refresh => {}
+            MessageCardMsg::LoadRemoteOnce => self.remote_allowed = true,
+            MessageCardMsg::AllowSender => {
+                self.remote_allowed = true;
+                if let Some(sender_addr) = self.sender_addr.clone() {
+                    let _ = sender.output(MessageCardOutput::AllowSender {
+                        sender: sender_addr,
+                    });
+                }
+            }
             MessageCardMsg::SetBody { body, has_attach } => {
                 self.view = if body.html.is_some() {
                     BodyView::Html
@@ -293,16 +368,30 @@ impl FactoryComponent for MessageCard {
     }
 
     fn post_view(&self, _sender: FactorySender<Self>) {
-        if !self.expanded
-            || self.view != BodyView::Html
-            || self.body.status != BodyStatus::Ready
-            || html_slot.first_child().is_some()
-        {
+        if !self.expanded || self.view != BodyView::Html || self.body.status != BodyStatus::Ready {
             return;
         }
-        if let Some(html) = self.body.html.as_deref() {
-            html_slot.append(&html_view::new_webview(html));
+        let Some(html) = self.body.html.as_deref() else {
+            return;
+        };
+        let current = html_slot.first_child();
+        let up_to_date = current
+            .as_ref()
+            .and_then(|child| child.downcast_ref::<WebView>())
+            .is_some_and(|webview| {
+                webview.default_content_security_policy().is_none() == self.remote_allowed
+            });
+        if up_to_date {
+            return;
         }
+        if let Some(child) = current {
+            html_slot.remove(&child);
+        }
+        html_slot.append(&html_view::new_webview(
+            html,
+            &self.body.inline,
+            self.remote_allowed,
+        ));
     }
 }
 
@@ -335,6 +424,18 @@ impl MessageCard {
     fn body_page(&self) -> &'static str {
         page_for(&self.body, self.view)
     }
+
+    fn show_remote_banner(&self) -> bool {
+        remote_banner_visible(self)
+    }
+}
+
+fn remote_banner_visible(card: &MessageCard) -> bool {
+    card.expanded
+        && card.view == BodyView::Html
+        && card.body.status == BodyStatus::Ready
+        && card.body.has_remote
+        && !card.remote_allowed
 }
 
 fn page_for(body: &BodyFields, view: BodyView) -> &'static str {
@@ -384,6 +485,9 @@ pub enum ConversationMsg {
         message_id: i64,
         body: BodyFields,
         has_attach: bool,
+    },
+    AllowSender {
+        sender: String,
     },
     Retry,
 }
@@ -465,7 +569,14 @@ impl SimpleComponent for Conversation {
         _root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let list = FactoryVecDeque::builder().launch_default().detach();
+        let list =
+            FactoryVecDeque::builder()
+                .launch_default()
+                .forward(sender.input_sender(), |output| match output {
+                    MessageCardOutput::AllowSender { sender } => {
+                        ConversationMsg::AllowSender { sender }
+                    }
+                });
         let model = Conversation {
             store,
             list,
@@ -561,6 +672,14 @@ impl SimpleComponent for Conversation {
                         .send(index, MessageCardMsg::SetBody { body, has_attach });
                 }
             }
+            ConversationMsg::AllowSender { sender: address } => {
+                let store = self.store.clone();
+                sender.oneshot_command(async move {
+                    if let Err(err) = store.allow_remote_content(&address).await {
+                        debug!(detail = %err, "failed to store remote content sender");
+                    }
+                });
+            }
             ConversationMsg::Retry => {
                 if let Some((folder_id, uid)) = self.selection {
                     sender.input(ConversationMsg::Load { folder_id, uid });
@@ -596,26 +715,41 @@ async fn load_conversation(
             .map_err(|err| err.to_string())?,
         None => vec![anchor],
     };
+    let allowed: HashSet<String> = store
+        .remote_content_senders()
+        .await
+        .map_err(|err| err.to_string())?
+        .into_iter()
+        .collect();
     let now = glib::DateTime::now_local()
         .or_else(|_| glib::DateTime::from_unix_utc(0))
         .expect("the Unix epoch is always a valid timestamp");
     let mut cards = Vec::with_capacity(records.len());
     for record in &records {
-        cards.push(message_card(record, &now).await);
+        cards.push(message_card(record, &now, &allowed).await);
     }
     Ok(cards)
 }
 
-async fn message_card(record: &MessageRecord, now: &glib::DateTime) -> MessageCard {
+async fn message_card(
+    record: &MessageRecord,
+    now: &glib::DateTime,
+    allowed: &HashSet<String>,
+) -> MessageCard {
     let flags = bits_to_flags(record.flags);
     let unread = !flags.seen;
     let timestamp = record.date_sent.or(record.date_recv);
     let body = body_fields(record).await;
+    let sender_addr = record.from_addr.clone();
+    let remote_allowed = sender_addr
+        .as_deref()
+        .is_some_and(|address| allowed.contains(&address.trim().to_ascii_lowercase()));
     MessageCard {
         message_id: record.id.unwrap_or_default(),
         folder_id: record.folder_id,
         uid: record.uid,
         sender: display_sender(record),
+        sender_addr,
         date: timestamp
             .map(|timestamp| format_timestamp(timestamp, now))
             .unwrap_or_default(),
@@ -629,6 +763,7 @@ async fn message_card(record: &MessageRecord, now: &glib::DateTime) -> MessageCa
         } else {
             BodyView::Plain
         },
+        remote_allowed,
         body,
     }
 }
@@ -646,6 +781,12 @@ async fn body_fields(record: &MessageRecord) -> BodyFields {
     match mail_core::mime::parse(&raw) {
         Some(parsed) => {
             let html = parsed.html.filter(|html| !html.trim().is_empty());
+            let has_remote = html.as_deref().is_some_and(html_view::has_remote_content);
+            let inline = if html.is_some() {
+                html_view::inline_parts(parsed.attachments)
+            } else {
+                Vec::new()
+            };
             match parsed.text {
                 Some(text) if !text.trim().is_empty() => {
                     let (head, quote) = split_quote(&text);
@@ -656,6 +797,8 @@ async fn body_fields(record: &MessageRecord) -> BodyFields {
                         quote: quote.unwrap_or_default(),
                         has_quote,
                         html,
+                        has_remote,
+                        inline,
                     }
                 }
                 _ if html.is_some() => BodyFields {
@@ -664,6 +807,8 @@ async fn body_fields(record: &MessageRecord) -> BodyFields {
                     quote: String::new(),
                     has_quote: false,
                     html,
+                    has_remote,
+                    inline,
                 },
                 _ => BodyFields::unavailable(),
             }
@@ -739,7 +884,51 @@ mod tests {
             quote: String::new(),
             has_quote: false,
             html: html.map(str::to_string),
+            has_remote: false,
+            inline: Vec::new(),
         }
+    }
+
+    fn card(body: BodyFields) -> MessageCard {
+        MessageCard {
+            message_id: 1,
+            folder_id: 1,
+            uid: 1,
+            sender: "Ada Lovelace".to_string(),
+            sender_addr: Some("ada@lovelace.dev".to_string()),
+            date: String::new(),
+            subject: "Hello".to_string(),
+            unread: true,
+            has_attach: false,
+            expanded: true,
+            quote_visible: false,
+            view: BodyView::Html,
+            remote_allowed: false,
+            body,
+        }
+    }
+
+    #[test]
+    fn remote_banner_shows_only_for_blocked_remote_html() {
+        let mut body = ready_body(Some("<img src=\"https://example.org/a.png\">"));
+        body.has_remote = true;
+        let mut card = card(body);
+        assert!(remote_banner_visible(&card));
+
+        card.remote_allowed = true;
+        assert!(!remote_banner_visible(&card));
+
+        card.remote_allowed = false;
+        card.view = BodyView::Plain;
+        assert!(!remote_banner_visible(&card));
+
+        card.view = BodyView::Html;
+        card.expanded = false;
+        assert!(!remote_banner_visible(&card));
+
+        card.expanded = true;
+        card.body.has_remote = false;
+        assert!(!remote_banner_visible(&card));
     }
 
     #[test]

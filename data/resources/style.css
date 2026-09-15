@@ -95,3 +95,9 @@
   color: @accent_color;
   font-size: 0.85em;
 }
+
+.conversation-remote-banner {
+  border-radius: 8px;
+  padding: 8px 10px;
+  background-color: alpha(@window_fg_color, 0.06);
+}

@@ -131,6 +131,43 @@ mod tests {
         );
     }
 
+    const INLINE_MESSAGE: &str = concat!(
+        "From: Sender <sender@example.org>\r\n",
+        "To: me@example.org\r\n",
+        "Subject: inline\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/related; boundary=\"REL\"\r\n",
+        "\r\n",
+        "--REL\r\n",
+        "Content-Type: text/html; charset=\"utf-8\"\r\n",
+        "\r\n",
+        "<p><img src=\"cid:logo@example.org\"></p>\r\n",
+        "--REL\r\n",
+        "Content-Type: image/png\r\n",
+        "Content-Transfer-Encoding: base64\r\n",
+        "Content-ID: <logo@example.org>\r\n",
+        "\r\n",
+        "aGk=\r\n",
+        "--REL--\r\n",
+    );
+
+    #[test]
+    fn captures_inline_parts_with_their_content_id() {
+        let parsed = parse(INLINE_MESSAGE.as_bytes()).unwrap();
+        assert_eq!(parsed.attachments.len(), 1);
+
+        let inline = &parsed.attachments[0];
+        assert_eq!(inline.content_id.as_deref(), Some("logo@example.org"));
+        assert_eq!(inline.mime_type, "image/png");
+        assert_eq!(inline.data, b"hi");
+        assert!(
+            parsed
+                .html
+                .as_deref()
+                .is_some_and(|html| html.contains("cid:logo@example.org"))
+        );
+    }
+
     #[test]
     fn parses_plain_text() {
         let raw = "From: a@example.org\r\nSubject: hi\r\n\r\nbody line\r\n";
