@@ -7,6 +7,7 @@
 //! commands sent over a channel, so callers never block the async
 //! runtime on database I/O. The [`Store`] handle is the async facade.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::folder::{Folder, FolderState};
@@ -32,6 +33,10 @@ enum Command {
     UpsertAccount {
         account: AccountRecord,
         reply: oneshot::Sender<StoreResult<i64>>,
+    },
+    PruneAccounts {
+        keep: Vec<(String, String)>,
+        reply: oneshot::Sender<StoreResult<()>>,
     },
     Folders {
         account_id: i64,
@@ -189,6 +194,16 @@ impl Store {
     pub async fn upsert_account(&self, account: AccountRecord) -> StoreResult<i64> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::UpsertAccount { account, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn prune_accounts(&self, keep: &[(String, String)]) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::PruneAccounts {
+            keep: keep.to_vec(),
+            reply,
+        })
+        .await?;
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
@@ -426,6 +441,9 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
             Command::UpsertAccount { account, reply } => {
                 reply_send(reply, upsert_account(&connection, &account))
             }
+            Command::PruneAccounts { keep, reply } => {
+                reply_send(reply, prune_accounts(&mut connection, &keep))
+            }
             Command::Folders { account_id, reply } => {
                 reply_send(reply, folders(&connection, account_id))
             }
@@ -591,6 +609,41 @@ fn upsert_account(connection: &Connection, account: &AccountRecord) -> StoreResu
             |row| row.get(0),
         )
         .map_err(Into::into)
+}
+
+fn prune_accounts(connection: &mut Connection, keep: &[(String, String)]) -> StoreResult<()> {
+    let keep: HashSet<(&str, &str)> = keep
+        .iter()
+        .map(|(source, external_id)| (source.as_str(), external_id.as_str()))
+        .collect();
+    let transaction = connection.transaction()?;
+    let removed: Vec<i64> = {
+        let mut statement = transaction.prepare("SELECT id, source, external_id FROM account")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .filter(|(_, source, external_id)| {
+                !keep.contains(&(source.as_str(), external_id.as_str()))
+            })
+            .map(|(id, _, _)| id)
+            .collect()
+    };
+    for account_id in removed {
+        transaction.execute(
+            "DELETE FROM message_fts WHERE rowid IN (SELECT m.id FROM message m JOIN folder f ON f.id = m.folder_id WHERE f.account_id = ?1)",
+            [account_id],
+        )?;
+        transaction.execute("DELETE FROM account WHERE id = ?1", [account_id])?;
+    }
+    transaction.commit()?;
+    Ok(())
 }
 
 fn folders(connection: &Connection, account_id: i64) -> StoreResult<Vec<FolderRecord>> {

@@ -616,3 +616,31 @@ async fn upsert_folder_returns_existing_id_after_reopen() {
         folder_id
     );
 }
+
+#[tokio::test]
+async fn prune_accounts_removes_unlisted_accounts_and_cascades() {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    store.upsert_message(message(folder_id, 1)).await.unwrap();
+
+    store
+        .prune_accounts(&[("goa".to_string(), "account_1".to_string())])
+        .await
+        .unwrap();
+    assert_eq!(store.accounts().await.unwrap().len(), 1);
+
+    store
+        .prune_accounts(&[("goa".to_string(), "account_2".to_string())])
+        .await
+        .unwrap();
+    assert!(store.accounts().await.unwrap().is_empty());
+    assert!(store.folders(account_id).await.unwrap().is_empty());
+    assert!(
+        store
+            .search(&fts_query("subject"), 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

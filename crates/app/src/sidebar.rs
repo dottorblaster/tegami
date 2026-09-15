@@ -52,7 +52,7 @@ pub struct FolderRow {
 impl FactoryComponent for FolderRow {
     type Init = SidebarRow;
     type Input = ();
-    type Output = FolderTreeOutput;
+    type Output = ();
     type CommandOutput = ();
     type ParentWidget = gtk::ListBox;
 
@@ -60,7 +60,6 @@ impl FactoryComponent for FolderRow {
         root = gtk::ListBoxRow {
             set_activatable: !self.is_header(),
             set_selectable: !self.is_header(),
-            connect_activate => (),
 
             gtk::Box {
                 set_orientation: gtk::Orientation::Horizontal,
@@ -100,17 +99,21 @@ impl FactoryComponent for FolderRow {
         Self { kind: init, unread }
     }
 
-    fn update(&mut self, _msg: Self::Input, sender: FactorySender<Self>) {
-        if let SidebarRow::Folder { key, title, .. } = &self.kind {
-            let _ = sender.output(FolderTreeOutput::Selected {
-                key: key.clone(),
-                title: title.clone(),
-            });
-        }
-    }
+    fn update(&mut self, _msg: Self::Input, _sender: FactorySender<Self>) {}
 }
 
 impl FolderRow {
+    fn selected(&self) -> Option<FolderTreeOutput> {
+        if let SidebarRow::Folder { key, title, .. } = &self.kind {
+            Some(FolderTreeOutput::Selected {
+                key: key.clone(),
+                title: title.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
     fn is_header(&self) -> bool {
         matches!(self.kind, SidebarRow::Account { .. })
     }
@@ -158,7 +161,7 @@ impl SidebarState {
 pub enum FolderTreeMsg {
     Reload,
     Loaded(Result<Vec<SidebarRow>, String>),
-    Selected { key: FolderKey, title: String },
+    RowActivated { index: i32 },
 }
 
 pub struct FolderTree {
@@ -190,6 +193,10 @@ impl SimpleComponent for FolderTree {
                     set_hexpand: true,
                     add_css_class: relm4::css::NAVIGATION_SIDEBAR,
                     set_selection_mode: gtk::SelectionMode::Single,
+
+                    connect_row_activated[sender] => move |_, row| {
+                        sender.input(FolderTreeMsg::RowActivated { index: row.index() });
+                    },
                 },
             },
 
@@ -237,14 +244,7 @@ impl SimpleComponent for FolderTree {
         _root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
-        let rows =
-            FactoryVecDeque::builder()
-                .launch_default()
-                .forward(sender.input_sender(), |msg| match msg {
-                    FolderTreeOutput::Selected { key, title } => {
-                        FolderTreeMsg::Selected { key, title }
-                    }
-                });
+        let rows = FactoryVecDeque::builder().launch_default().detach();
         let model = FolderTree {
             rows,
             store,
@@ -288,8 +288,14 @@ impl SimpleComponent for FolderTree {
                     self.state = SidebarState::Error(detail);
                 }
             },
-            FolderTreeMsg::Selected { key, title } => {
-                let _ = sender.output(FolderTreeOutput::Selected { key, title });
+            FolderTreeMsg::RowActivated { index } => {
+                if let Some(output) = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| self.rows.get(index))
+                    .and_then(FolderRow::selected)
+                {
+                    let _ = sender.output(output);
+                }
             }
         }
     }

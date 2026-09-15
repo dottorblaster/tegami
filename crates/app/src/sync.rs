@@ -240,19 +240,26 @@ async fn discover(store: &Store) -> Result<Vec<ServiceAccount>, String> {
         .await
         .map_err(|err| err.to_string())?;
     let mut discovered = Vec::new();
-    for account in manager.accounts().await {
+    let accounts = manager.accounts().await;
+    let mut seen = Vec::with_capacity(accounts.len());
+    for account in &accounts {
+        let record = account.to_record();
+        seen.push((
+            record.source.as_str().to_string(),
+            record.external_id.clone(),
+        ));
+        let account_id = store
+            .upsert_account(record)
+            .await
+            .map_err(|err| err.to_string())?;
         let Some(credential) = credential_worker
-            .credentials(&connection, &account)
+            .credentials(&connection, account)
             .await
             .map_err(|err| format!("{err:?}"))?
         else {
             warn!(account = account.id(), "no credential available");
             continue;
         };
-        let account_id = store
-            .upsert_account(account.to_record())
-            .await
-            .map_err(|err| err.to_string())?;
         discovered.push(ServiceAccount {
             account_id,
             config: account.config.clone(),
@@ -263,6 +270,12 @@ async fn discover(store: &Store) -> Result<Vec<ServiceAccount>, String> {
                 accounts::Credentials::OAuth2(token) => mail_core::Credential::OAuth2(token),
             },
         });
+    }
+    if !seen.is_empty() {
+        store
+            .prune_accounts(&seen)
+            .await
+            .map_err(|err| err.to_string())?;
     }
     Ok(discovered)
 }
