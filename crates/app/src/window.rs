@@ -12,7 +12,7 @@ use relm4::actions::RelmAction;
 use relm4::adw::prelude::*;
 use relm4::gtk::glib;
 use relm4::prelude::*;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::application::{About, Quit};
 use crate::composer::{self, Composer, ComposerOutput};
@@ -495,17 +495,20 @@ impl SimpleComponent for Window {
                 }
             }
             WindowMsg::DraftReady(draft) => {
-                debug!(
-                    from = draft
-                        .identity
-                        .as_ref()
-                        .map(|identity| identity.email.as_str())
-                        .unwrap_or_default(),
-                    to = %draft.to,
-                    subject = %draft.subject,
-                    body_len = draft.body.len(),
-                    "composer draft ready"
-                );
+                sender.oneshot_command(async move {
+                    let message = composer::outgoing(&draft);
+                    match mail_core::compose::build(&message) {
+                        Ok(raw) => debug!(
+                            bytes = raw.len(),
+                            to = %draft.to,
+                            subject = %draft.subject,
+                            "composed message built"
+                        ),
+                        Err(err) => {
+                            warn!(detail = %err, "failed to build composed message")
+                        }
+                    }
+                });
             }
             WindowMsg::SyncError { detail } => {
                 debug!(detail, "sync error");

@@ -9,6 +9,7 @@
 
 pub mod account;
 pub mod backend;
+pub mod compose;
 pub mod envelope;
 pub mod folder;
 pub mod mime;

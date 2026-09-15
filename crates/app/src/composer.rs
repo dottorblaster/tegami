@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use mail_core::compose::{self, Address, OutgoingMessage};
 use mail_core::store::{AccountRecord, Store};
 use relm4::adw;
 use relm4::gtk::prelude::*;
@@ -91,6 +92,28 @@ pub fn draft(
         subject: subject.trim().to_string(),
         body: body.to_string(),
     }
+}
+
+pub fn outgoing(draft: &MessageDraft) -> OutgoingMessage {
+    OutgoingMessage {
+        from: draft.identity.as_ref().map(sender_address),
+        to: compose::parse_addresses(&draft.to),
+        cc: compose::parse_addresses(&draft.cc),
+        bcc: compose::parse_addresses(&draft.bcc),
+        subject: draft.subject.clone(),
+        text: Some(draft.body.clone()),
+        ..OutgoingMessage::default()
+    }
+}
+
+fn sender_address(identity: &Identity) -> Address {
+    let name = identity.name.trim();
+    let name = if name.is_empty() || name.eq_ignore_ascii_case(&identity.email) {
+        None
+    } else {
+        Some(name.to_string())
+    };
+    Address::new(name, identity.email.clone())
 }
 
 pub struct Composer {
@@ -466,5 +489,43 @@ mod tests {
     fn window_title_follows_the_subject() {
         assert_eq!(window_title("   "), "New Message");
         assert_eq!(window_title(" Lunch? "), "Lunch?");
+    }
+
+    #[test]
+    fn outgoing_messages_carry_identity_and_recipients() {
+        let identity = identities(&[account(7, Some("Ada Lovelace"), "ada@lovelace.dev")])
+            .into_iter()
+            .next();
+        let draft = draft(
+            identity,
+            "grace@navy.dev, \"Hopper, G\" <g@navy.dev>",
+            "cc@example.org",
+            "",
+            "Greetings",
+            "Hello there",
+        );
+        let outgoing = outgoing(&draft);
+
+        let from = outgoing.from.as_ref().unwrap();
+        assert_eq!(from.name.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(from.email, "ada@lovelace.dev");
+        assert_eq!(outgoing.to.len(), 2);
+        assert_eq!(outgoing.to[1].name.as_deref(), Some("Hopper, G"));
+        assert_eq!(outgoing.cc.len(), 1);
+        assert_eq!(outgoing.cc[0].email, "cc@example.org");
+        assert!(outgoing.bcc.is_empty());
+        assert_eq!(outgoing.subject, "Greetings");
+        assert_eq!(outgoing.text.as_deref(), Some("Hello there"));
+        assert!(outgoing.html.is_none());
+        assert!(outgoing.attachments.is_empty());
+    }
+
+    #[test]
+    fn outgoing_skips_redundant_sender_names() {
+        let identity = identities(&[account(7, None, "ada@lovelace.dev")])
+            .into_iter()
+            .next();
+        let outgoing = outgoing(&draft(identity, "me@example.org", "", "", "", ""));
+        assert_eq!(outgoing.from.unwrap().name, None);
     }
 }

@@ -12,6 +12,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+mail-builder = "1.0"
 mail-parser = "0.11"
 rusqlite = { version = "0.40", features = ["bundled-full"] }
 tokio = { version = "1", features = ["fs", "net", "rt", "rt-multi-thread", "sync", "time"] }
