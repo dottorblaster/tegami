@@ -16,9 +16,22 @@ relm4::new_stateless_action!(pub About, AppGroup, "about");
 pub fn run() {
     let app = RelmApp::new(config::APP_ID);
     register_actions();
+    load_style();
     debug!("application started");
     app.run::<Window>(());
     debug!("application stopped");
+}
+
+fn load_style() {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_resource("/it/dottorblaster/tegami/style.css");
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 fn register_actions() {

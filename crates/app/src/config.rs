@@ -3,3 +3,10 @@
 
 pub const APP_ID: &str = env!("TEGAMI_APP_ID");
 pub const VERSION: &str = env!("TEGAMI_VERSION");
+
+/// The store backing the UI shell's account and folder state.
+pub fn store_path() -> std::path::PathBuf {
+    let dir = relm4::gtk::glib::user_data_dir().join("tegami");
+    std::fs::create_dir_all(&dir).expect("failed to create data directory");
+    dir.join("mail.sqlite3")
+}

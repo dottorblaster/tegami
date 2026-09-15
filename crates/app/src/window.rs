@@ -1,7 +1,10 @@
 // Copyright (C) 2026 Tegami contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::sync::Arc;
+
 use gtk::gio;
+use mail_core::store::Store;
 use relm4::actions::RelmAction;
 use relm4::adw::prelude::*;
 use relm4::gtk::glib;
@@ -9,16 +12,26 @@ use relm4::prelude::*;
 use tracing::debug;
 
 use crate::application::{About, Quit};
+use crate::config;
+use crate::sidebar::{FolderKey, FolderTree, FolderTreeOutput};
 
 const COLLAPSE_FOLDERS_WIDTH: f64 = 860.0;
 const COLLAPSE_READING_WIDTH: f64 = 500.0;
 
-pub struct Window;
+pub struct Window {
+    folder_tree: Controller<FolderTree>,
+    mailbox_page_title: String,
+}
+
+#[derive(Debug)]
+pub enum WindowMsg {
+    FolderSelected { key: FolderKey, title: String },
+}
 
 #[relm4::component(pub)]
 impl SimpleComponent for Window {
     type Init = ();
-    type Input = ();
+    type Input = WindowMsg;
     type Output = ();
 
     view! {
@@ -48,6 +61,12 @@ impl SimpleComponent for Window {
                         set_orientation: gtk::Orientation::Vertical,
                         set_hexpand: true,
                         set_vexpand: true,
+
+                        #[local_ref]
+                        folder_tree -> gtk::ScrolledWindow {
+                            set_vexpand: true,
+                            set_hexpand: true,
+                        },
                     },
                 },
 
@@ -58,9 +77,11 @@ impl SimpleComponent for Window {
                     set_max_sidebar_width: 520.0,
                     set_sidebar_width_fraction: 0.355,
 
+                    #[name(mailbox_page)]
                     #[wrap(Some)]
                     set_sidebar = &adw::NavigationPage {
-                        set_title: "Inbox",
+                        #[watch]
+                        set_title: &model.mailbox_page_title,
                         set_tag: Some("mailbox"),
 
                         #[wrap(Some)]
@@ -110,8 +131,20 @@ impl SimpleComponent for Window {
     fn init(
         _init: Self::Init,
         _root: Self::Root,
-        _sender: ComponentSender<Self>,
+        sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
+        let store = Arc::new(Store::open(config::store_path()).expect("failed to open mail store"));
+        let folder_tree = FolderTree::builder()
+            .launch(store)
+            .forward(sender.input_sender(), |msg| match msg {
+                FolderTreeOutput::Selected { key, title } => WindowMsg::FolderSelected { key, title },
+            });
+        let model = Window {
+            folder_tree,
+            mailbox_page_title: "Inbox".to_string(),
+        };
+
+        let folder_tree = model.folder_tree.widget();
         let widgets = view_output!();
 
         let menu = gio::Menu::new();
@@ -134,12 +167,19 @@ impl SimpleComponent for Window {
         debug!("main window initialized");
 
         ComponentParts {
-            model: Window,
+            model,
             widgets,
         }
     }
 
-    fn update(&mut self, _msg: Self::Input, _sender: ComponentSender<Self>) {}
+    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+        match msg {
+            WindowMsg::FolderSelected { key, title } => {
+                self.mailbox_page_title = title;
+                debug!(account = key.account_id, folder = %key.name, "folder selected");
+            }
+        }
+    }
 }
 
 fn collapse_breakpoint(max_width: f64, widget: &impl IsA<glib::Object>) -> adw::Breakpoint {

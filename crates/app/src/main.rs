@@ -4,6 +4,7 @@
 mod application;
 mod config;
 mod logging;
+mod sidebar;
 mod window;
 
 use relm4::gtk::gio;

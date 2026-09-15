@@ -1,1 +1,8 @@
-
+.unread-badge {
+  border-radius: 999px;
+  padding: 1px 8px;
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+  font-weight: 600;
+  font-size: 0.84em;
+}
