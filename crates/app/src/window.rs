@@ -13,6 +13,7 @@ use tracing::debug;
 
 use crate::application::{About, Quit};
 use crate::config;
+use crate::conversation::{Conversation, ConversationMsg, ConversationOutput};
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
 use crate::sidebar::{FolderKey, FolderTree, FolderTreeMsg, FolderTreeOutput};
 use crate::sync::{SyncService, SyncServiceMsg, SyncServiceOutput};
@@ -23,7 +24,9 @@ const COLLAPSE_READING_WIDTH: f64 = 500.0;
 pub struct Window {
     folder_tree: Controller<FolderTree>,
     message_list: Controller<MessageList>,
+    conversation: Controller<Conversation>,
     sync_service: Controller<SyncService>,
+    split_view: Option<adw::NavigationSplitView>,
     mailbox_page_title: String,
     selected_folder_id: Option<i64>,
 }
@@ -32,6 +35,8 @@ pub struct Window {
 pub enum WindowMsg {
     FolderSelected { key: FolderKey, title: String },
     MessageSelected { folder_id: i64, uid: u32 },
+    FetchBody { folder_id: i64, uid: u32 },
+    BodyFetched { message_id: i64 },
     AccountsChanged,
     FolderChanged { folder_id: i64 },
     SyncError { detail: String },
@@ -132,6 +137,12 @@ impl SimpleComponent for Window {
                                 set_orientation: gtk::Orientation::Vertical,
                                 set_hexpand: true,
                                 set_vexpand: true,
+
+                                #[local_ref]
+                                conversation -> adw::ViewStack {
+                                    set_vexpand: true,
+                                    set_hexpand: true,
+                                },
                             },
                         },
                     },
@@ -165,6 +176,14 @@ impl SimpleComponent for Window {
                         WindowMsg::MessageSelected { folder_id, uid }
                     }
                 });
+        let conversation =
+            Conversation::builder()
+                .launch(store.clone())
+                .forward(sender.input_sender(), |msg| match msg {
+                    ConversationOutput::FetchBody { folder_id, uid } => {
+                        WindowMsg::FetchBody { folder_id, uid }
+                    }
+                });
         let sync_service =
             SyncService::builder()
                 .launch(store)
@@ -173,19 +192,26 @@ impl SimpleComponent for Window {
                     SyncServiceOutput::FolderChanged { folder_id } => {
                         WindowMsg::FolderChanged { folder_id }
                     }
+                    SyncServiceOutput::BodyFetched { message_id } => {
+                        WindowMsg::BodyFetched { message_id }
+                    }
                     SyncServiceOutput::Error { detail } => WindowMsg::SyncError { detail },
                 });
-        let model = Window {
+        let mut model = Window {
             folder_tree,
             message_list,
+            conversation,
             sync_service,
+            split_view: None,
             mailbox_page_title: "Inbox".to_string(),
             selected_folder_id: None,
         };
 
         let folder_tree = model.folder_tree.widget();
         let message_list = model.message_list.widget();
+        let conversation = model.conversation.widget();
         let widgets = view_output!();
+        model.split_view = Some(widgets.inner_view.clone());
 
         let menu = gio::Menu::new();
         menu.append_item(&RelmAction::<About>::to_menu_item("About Tegami"));
@@ -224,7 +250,20 @@ impl SimpleComponent for Window {
                 debug!(account = key.account_id, folder = %key.name, "folder selected");
             }
             WindowMsg::MessageSelected { folder_id, uid } => {
+                self.conversation
+                    .emit(ConversationMsg::Load { folder_id, uid });
+                if let Some(split_view) = &self.split_view {
+                    split_view.set_show_content(true);
+                }
                 debug!(folder_id, uid, "message selected");
+            }
+            WindowMsg::FetchBody { folder_id, uid } => {
+                self.sync_service
+                    .emit(SyncServiceMsg::FetchBody { folder_id, uid });
+            }
+            WindowMsg::BodyFetched { message_id } => {
+                self.conversation
+                    .emit(ConversationMsg::BodyFetched { message_id });
             }
             WindowMsg::AccountsChanged => {
                 self.folder_tree.emit(FolderTreeMsg::Reload);

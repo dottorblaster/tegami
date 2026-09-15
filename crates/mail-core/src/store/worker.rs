@@ -37,6 +37,10 @@ enum Command {
         account_id: i64,
         reply: oneshot::Sender<StoreResult<Vec<FolderRecord>>>,
     },
+    Folder {
+        folder_id: i64,
+        reply: oneshot::Sender<StoreResult<Option<FolderRecord>>>,
+    },
     UpsertFolder {
         folder: FolderRecord,
         reply: oneshot::Sender<StoreResult<i64>>,
@@ -191,6 +195,12 @@ impl Store {
     pub async fn folders(&self, account_id: i64) -> StoreResult<Vec<FolderRecord>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::Folders { account_id, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn folder(&self, folder_id: i64) -> StoreResult<Option<FolderRecord>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::Folder { folder_id, reply }).await?;
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
@@ -419,6 +429,9 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
             Command::Folders { account_id, reply } => {
                 reply_send(reply, folders(&connection, account_id))
             }
+            Command::Folder { folder_id, reply } => {
+                reply_send(reply, folder(&connection, folder_id))
+            }
             Command::UpsertFolder { folder, reply } => {
                 reply_send(reply, upsert_folder(&connection, &folder))
             }
@@ -585,6 +598,17 @@ fn folders(connection: &Connection, account_id: i64) -> StoreResult<Vec<FolderRe
         .query_map([account_id], FolderRecord::from_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn folder(connection: &Connection, folder_id: i64) -> StoreResult<Option<FolderRecord>> {
+    connection
+        .query_row(
+            &format!("SELECT {FOLDER_COLUMNS} FROM folder WHERE id = ?1"),
+            [folder_id],
+            FolderRecord::from_row,
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 fn upsert_folder(connection: &Connection, folder: &FolderRecord) -> StoreResult<i64> {

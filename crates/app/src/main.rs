@@ -3,8 +3,10 @@
 
 mod application;
 mod config;
+mod conversation;
 mod logging;
 mod message_list;
+mod message_text;
 mod sidebar;
 mod sync;
 mod window;

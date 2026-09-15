@@ -15,9 +15,7 @@ use relm4::prelude::*;
 use relm4::typed_view::list::{RelmListItem, TypedListView};
 use tracing::debug;
 
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
+use crate::message_text::{display_sender, display_subject, format_timestamp};
 
 #[derive(Debug, Clone)]
 pub struct MessageRow {
@@ -405,59 +403,6 @@ async fn load_rows(store: &Store, folder_id: i64) -> Result<Vec<MessageRow>, Str
         .collect())
 }
 
-fn display_subject(subject: &str) -> String {
-    let subject = subject.trim();
-    if subject.is_empty() {
-        "(no subject)".to_string()
-    } else {
-        subject.to_string()
-    }
-}
-
-fn display_sender(record: &MessageRecord) -> String {
-    if let Some(name) = non_empty(record.from_name.as_deref()) {
-        return name.to_string();
-    }
-    if let Some(address) = non_empty(record.from_addr.as_deref()) {
-        return address.to_string();
-    }
-    "(unknown sender)".to_string()
-}
-
-fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn format_timestamp(timestamp: i64, now: &glib::DateTime) -> String {
-    match glib::DateTime::from_unix_local(timestamp) {
-        Ok(date) => format_relative(&date, now),
-        Err(_) => String::new(),
-    }
-}
-
-fn format_relative(date: &glib::DateTime, now: &glib::DateTime) -> String {
-    if date.year() == now.year()
-        && date.month() == now.month()
-        && date.day_of_month() == now.day_of_month()
-    {
-        format!("{:02}:{:02}", date.hour(), date.minute())
-    } else if date.year() == now.year() {
-        format!("{} {}", date.day_of_month(), month_name(date.month()))
-    } else {
-        format!(
-            "{:04}-{:02}-{:02}",
-            date.year(),
-            date.month(),
-            date.day_of_month()
-        )
-    }
-}
-
-fn month_name(month: i32) -> &'static str {
-    let index = (month - 1).clamp(0, 11) as usize;
-    MONTHS[index]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,24 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn display_subject_falls_back_when_blank() {
-        assert_eq!(display_subject("  "), "(no subject)");
-        assert_eq!(display_subject(" Meeting "), "Meeting");
-    }
-
-    #[test]
-    fn display_sender_prefers_name_then_address() {
-        let mut record = record(1, 0, false);
-        assert_eq!(display_sender(&record), "Ada Lovelace");
-
-        record.from_name = Some("   ".to_string());
-        assert_eq!(display_sender(&record), "ada@lovelace.dev");
-
-        record.from_addr = None;
-        assert_eq!(display_sender(&record), "(unknown sender)");
-    }
-
-    #[test]
     fn from_record_maps_flags() {
         let now = utc(1_700_000_000);
 
@@ -525,15 +452,6 @@ mod tests {
         assert!(!read_flagged.unread);
         assert!(read_flagged.flagged);
         assert!(!read_flagged.has_attach);
-    }
-
-    #[test]
-    fn format_relative_picks_day_year_and_clock() {
-        let now = utc(1_700_000_000);
-
-        assert_eq!(format_relative(&utc(1_699_990_000), &now), "19:26");
-        assert_eq!(format_relative(&utc(1_699_000_000), &now), "3 Nov");
-        assert_eq!(format_relative(&utc(1_600_000_000), &now), "2020-09-13");
     }
 
     #[test]

@@ -25,15 +25,33 @@ pub struct ServiceAccount {
 pub enum SyncServiceMsg {
     Start,
     AccountsLoaded(Vec<ServiceAccount>),
-    WorkerEvent { account_id: i64, event: WorkerEvent },
-    WatchFolder { account_id: i64, folder: String },
-    Failed { detail: String },
+    WorkerEvent {
+        account_id: i64,
+        event: WorkerEvent,
+    },
+    WatchFolder {
+        account_id: i64,
+        folder: String,
+    },
+    FetchBody {
+        folder_id: i64,
+        uid: u32,
+    },
+    FetchBodyResolved {
+        account_id: i64,
+        folder: String,
+        uid: u32,
+    },
+    Failed {
+        detail: String,
+    },
 }
 
 #[derive(Debug)]
 pub enum SyncServiceOutput {
     AccountsChanged,
     FolderChanged { folder_id: i64 },
+    BodyFetched { message_id: i64 },
     Error { detail: String },
 }
 
@@ -110,9 +128,11 @@ impl SyncService {
                     detail: format!("{operation}: {detail}"),
                 });
             }
+            WorkerEvent::BodyFetched { message_id, .. } => {
+                let _ = sender.output(SyncServiceOutput::BodyFetched { message_id });
+            }
             WorkerEvent::Connected
             | WorkerEvent::Disconnected
-            | WorkerEvent::BodyFetched { .. }
             | WorkerEvent::FlagsChanged { .. }
             | WorkerEvent::MessagesMoved { .. }
             | WorkerEvent::OpsReplayed(_)
@@ -178,6 +198,30 @@ impl SimpleComponent for SyncService {
             }
             SyncServiceMsg::WatchFolder { account_id, folder } => {
                 self.watch(account_id, folder);
+            }
+            SyncServiceMsg::FetchBody { folder_id, uid } => {
+                let store = self.store.clone();
+                let fetch_sender = sender.clone();
+                sender.oneshot_command(async move {
+                    match store.folder(folder_id).await {
+                        Ok(Some(folder)) => fetch_sender.input(SyncServiceMsg::FetchBodyResolved {
+                            account_id: folder.account_id,
+                            folder: folder.name,
+                            uid,
+                        }),
+                        Ok(None) => debug!(folder_id, uid, "cannot fetch body for unknown folder"),
+                        Err(err) => debug!(folder_id, uid, err = %err, "cannot resolve folder"),
+                    }
+                });
+            }
+            SyncServiceMsg::FetchBodyResolved {
+                account_id,
+                folder,
+                uid,
+            } => {
+                if let Some(worker) = self.workers.get(&account_id) {
+                    worker.send(WorkerCommand::FetchBody { folder, uid });
+                }
             }
             SyncServiceMsg::Failed { detail } => {
                 warn!(detail, "account discovery failed");

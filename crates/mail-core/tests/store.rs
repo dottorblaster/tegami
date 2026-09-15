@@ -575,3 +575,14 @@ async fn thread_messages_returns_the_whole_conversation() {
     assert_eq!(conversation[0].uid, 1);
     assert_eq!(conversation[1].uid, 2);
 }
+
+#[tokio::test]
+async fn folder_lookup_by_id() {
+    let (store, folder_id) = seeded_store().await;
+
+    let found = store.folder(folder_id).await.unwrap().unwrap();
+    assert_eq!(found.id, Some(folder_id));
+    assert_eq!(found.name, "INBOX");
+
+    assert!(store.folder(folder_id + 1).await.unwrap().is_none());
+}
