@@ -665,3 +665,30 @@ async fn remote_content_allowlist_round_trip() {
         vec!["ada@lovelace.dev".to_string(), "grace@navy.dev".to_string()]
     );
 }
+
+#[tokio::test]
+async fn update_message_flags_sets_and_clears_bits() {
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+    let mut record = message(folder_id, 1);
+    record.flags = FLAG_SEEN;
+    store.upsert_message(record).await.unwrap();
+    store.upsert_message(message(folder_id, 2)).await.unwrap();
+
+    store
+        .update_message_flags(folder_id, &[1, 2], FLAG_FLAGGED, 0)
+        .await
+        .unwrap();
+    let flagged = store.message(folder_id, 1).await.unwrap().unwrap();
+    assert_eq!(flagged.flags, FLAG_SEEN | FLAG_FLAGGED);
+    let plain = store.message(folder_id, 2).await.unwrap().unwrap();
+    assert_eq!(plain.flags, FLAG_SEEN | FLAG_FLAGGED);
+
+    store
+        .update_message_flags(folder_id, &[1, 2], 0, FLAG_FLAGGED | FLAG_SEEN)
+        .await
+        .unwrap();
+    let cleared = store.message(folder_id, 1).await.unwrap().unwrap();
+    assert_eq!(cleared.flags, 0);
+}

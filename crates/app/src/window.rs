@@ -1,10 +1,12 @@
 // Copyright (C) 2026 Tegami contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use gtk::gio;
-use mail_core::store::Store;
+use mail_core::envelope::FlagChange;
+use mail_core::store::{FLAG_FLAGGED, FLAG_SEEN, FolderRecord, SpecialUse, Store};
 use relm4::actions::RelmAction;
 use relm4::adw::prelude::*;
 use relm4::gtk::glib;
@@ -13,15 +15,16 @@ use tracing::debug;
 
 use crate::application::{About, Quit};
 use crate::config;
-use crate::conversation::{Conversation, ConversationMsg, ConversationOutput};
+use crate::conversation::{AnchorState, Conversation, ConversationMsg, ConversationOutput};
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
 use crate::sidebar::{FolderKey, FolderTree, FolderTreeMsg, FolderTreeOutput};
-use crate::sync::{SyncService, SyncServiceMsg, SyncServiceOutput};
+use crate::sync::{MessageAction, SyncService, SyncServiceMsg, SyncServiceOutput};
 
 const COLLAPSE_FOLDERS_WIDTH: f64 = 860.0;
 const COLLAPSE_READING_WIDTH: f64 = 500.0;
 
 pub struct Window {
+    store: Arc<Store>,
     folder_tree: Controller<FolderTree>,
     message_list: Controller<MessageList>,
     conversation: Controller<Conversation>,
@@ -29,17 +32,54 @@ pub struct Window {
     split_view: Option<adw::NavigationSplitView>,
     mailbox_page_title: String,
     selected_folder_id: Option<i64>,
+    anchor: Option<AnchorState>,
+    account_folders: Vec<FolderRecord>,
+    move_menu: Option<gio::Menu>,
+    move_actions: Option<gio::SimpleActionGroup>,
+    move_menu_dirty: Cell<bool>,
 }
 
 #[derive(Debug)]
 pub enum WindowMsg {
-    FolderSelected { key: FolderKey, title: String },
-    MessageSelected { folder_id: i64, uid: u32 },
-    FetchBody { folder_id: i64, uid: u32 },
-    BodyFetched { message_id: i64 },
+    FolderSelected {
+        key: FolderKey,
+        title: String,
+    },
+    MessageSelected {
+        folder_id: i64,
+        uid: u32,
+    },
+    FetchBody {
+        folder_id: i64,
+        uid: u32,
+    },
+    BodyFetched {
+        message_id: i64,
+    },
     AccountsChanged,
-    FolderChanged { folder_id: i64 },
-    SyncError { detail: String },
+    FolderChanged {
+        folder_id: i64,
+    },
+    SyncError {
+        detail: String,
+    },
+    Anchor(Option<AnchorState>),
+    Viewed {
+        folder_id: i64,
+        uids: Vec<u32>,
+    },
+    FoldersLoaded {
+        account_id: i64,
+        folders: Vec<FolderRecord>,
+    },
+    MessagesChanged {
+        folder_id: i64,
+    },
+    ToggleFlagged,
+    DeleteMessage,
+    MoveMessage {
+        target_folder_id: i64,
+    },
 }
 
 #[relm4::component(pub)]
@@ -131,7 +171,30 @@ impl SimpleComponent for Window {
 
                         #[wrap(Some)]
                         set_child = &adw::ToolbarView {
-                            add_top_bar = &adw::HeaderBar {},
+                            add_top_bar = &adw::HeaderBar {
+                                #[name(flag_button)]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "non-starred-symbolic",
+                                    set_tooltip_text: Some("Star this message"),
+                                    set_sensitive: false,
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::ToggleFlagged),
+                                },
+
+                                #[name(delete_button)]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "user-trash-symbolic",
+                                    set_tooltip_text: Some("Delete this message"),
+                                    set_sensitive: false,
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::DeleteMessage),
+                                },
+
+                                #[name(move_button)]
+                                pack_start = &gtk::MenuButton {
+                                    set_icon_name: "folder-symbolic",
+                                    set_tooltip_text: Some("Move this message"),
+                                    set_sensitive: false,
+                                },
+                            },
 
                             #[wrap(Some)]
                             set_content = &gtk::Box {
@@ -184,10 +247,14 @@ impl SimpleComponent for Window {
                     ConversationOutput::FetchBody { folder_id, uid } => {
                         WindowMsg::FetchBody { folder_id, uid }
                     }
+                    ConversationOutput::Anchor(anchor) => WindowMsg::Anchor(anchor),
+                    ConversationOutput::Viewed { folder_id, uids } => {
+                        WindowMsg::Viewed { folder_id, uids }
+                    }
                 });
         let sync_service =
             SyncService::builder()
-                .launch(store)
+                .launch(store.clone())
                 .forward(sender.input_sender(), |msg| match msg {
                     SyncServiceOutput::AccountsChanged => WindowMsg::AccountsChanged,
                     SyncServiceOutput::FolderChanged { folder_id } => {
@@ -199,6 +266,7 @@ impl SimpleComponent for Window {
                     SyncServiceOutput::Error { detail } => WindowMsg::SyncError { detail },
                 });
         let mut model = Window {
+            store,
             folder_tree,
             message_list,
             conversation,
@@ -206,6 +274,11 @@ impl SimpleComponent for Window {
             split_view: None,
             mailbox_page_title: "Inbox".to_string(),
             selected_folder_id: None,
+            anchor: None,
+            account_folders: Vec::new(),
+            move_menu: None,
+            move_actions: None,
+            move_menu_dirty: Cell::new(false),
         };
 
         let folder_tree = model.folder_tree.widget();
@@ -236,7 +309,7 @@ impl SimpleComponent for Window {
         ComponentParts { model, widgets }
     }
 
-    fn update(&mut self, msg: Self::Input, _sender: ComponentSender<Self>) {
+    fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             WindowMsg::FolderSelected { key, title } => {
                 self.mailbox_page_title = title;
@@ -270,16 +343,264 @@ impl SimpleComponent for Window {
                 self.folder_tree.emit(FolderTreeMsg::Reload);
             }
             WindowMsg::FolderChanged { folder_id } => {
-                self.folder_tree.emit(FolderTreeMsg::Reload);
-                if self.selected_folder_id == Some(folder_id) {
-                    self.message_list.emit(MessageListMsg::Load { folder_id });
+                self.reload_folder(folder_id);
+            }
+            WindowMsg::MessagesChanged { folder_id } => {
+                self.reload_folder(folder_id);
+            }
+            WindowMsg::Anchor(anchor) => {
+                let previous = self.anchor.as_ref().map(|anchor| anchor.account_id);
+                let previous_folder = self.anchor.as_ref().map(|anchor| anchor.folder_id);
+                let account = anchor.as_ref().map(|anchor| anchor.account_id);
+                let folder = anchor.as_ref().map(|anchor| anchor.folder_id);
+                self.anchor = anchor;
+                if account != previous {
+                    self.account_folders.clear();
+                    match account {
+                        Some(account_id) => {
+                            let store = self.store.clone();
+                            let folders_sender = sender.clone();
+                            sender.oneshot_command(async move {
+                                let folders = store.folders(account_id).await.unwrap_or_default();
+                                folders_sender.input(WindowMsg::FoldersLoaded {
+                                    account_id,
+                                    folders,
+                                });
+                            });
+                        }
+                        None => {
+                            self.move_menu = None;
+                            self.move_actions = None;
+                            self.move_menu_dirty.set(true);
+                        }
+                    }
+                } else if folder != previous_folder && !self.account_folders.is_empty() {
+                    self.rebuild_move_menu(&sender);
                 }
+            }
+            WindowMsg::Viewed { folder_id, uids } => {
+                self.apply_flag_change(
+                    folder_id,
+                    uids,
+                    FLAG_SEEN,
+                    0,
+                    FlagChange {
+                        seen: Some(true),
+                        ..FlagChange::default()
+                    },
+                    &sender,
+                );
+            }
+            WindowMsg::FoldersLoaded {
+                account_id,
+                folders,
+            } => {
+                if self.anchor.as_ref().map(|anchor| anchor.account_id) != Some(account_id) {
+                    return;
+                }
+                self.account_folders = folders;
+                self.rebuild_move_menu(&sender);
+            }
+            WindowMsg::ToggleFlagged => {
+                let Some(anchor) = self.anchor.clone() else {
+                    return;
+                };
+                let flagged = !anchor.flagged;
+                self.anchor = Some(AnchorState {
+                    flagged,
+                    ..anchor.clone()
+                });
+                let (set, clear) = if flagged {
+                    (FLAG_FLAGGED, 0)
+                } else {
+                    (0, FLAG_FLAGGED)
+                };
+                self.apply_flag_change(
+                    anchor.folder_id,
+                    vec![anchor.uid],
+                    set,
+                    clear,
+                    FlagChange {
+                        flagged: Some(flagged),
+                        ..FlagChange::default()
+                    },
+                    &sender,
+                );
+            }
+            WindowMsg::DeleteMessage => {
+                self.delete_message(&sender);
+            }
+            WindowMsg::MoveMessage { target_folder_id } => {
+                self.move_message(target_folder_id, &sender);
             }
             WindowMsg::SyncError { detail } => {
                 debug!(detail, "sync error");
             }
         }
     }
+
+    fn post_view(&self, _widgets: &mut Self::Widgets) {
+        let enabled = self.anchor.is_some();
+        let flagged = self.anchor.as_ref().is_some_and(|anchor| anchor.flagged);
+        flag_button.set_sensitive(enabled);
+        delete_button.set_sensitive(enabled);
+        move_button.set_sensitive(enabled);
+        flag_button.set_icon_name(if flagged {
+            "starred-symbolic"
+        } else {
+            "non-starred-symbolic"
+        });
+        flag_button.set_tooltip_text(Some(if flagged {
+            "Remove star"
+        } else {
+            "Star this message"
+        }));
+        if self.move_menu_dirty.replace(false) {
+            move_button.set_menu_model(self.move_menu.as_ref());
+            if let Some(group) = &self.move_actions {
+                move_button.insert_action_group("move", Some(group));
+            }
+        }
+    }
+}
+
+impl Window {
+    fn rebuild_move_menu(&mut self, sender: &ComponentSender<Self>) {
+        let current = self.anchor.as_ref().map(|anchor| anchor.folder_id);
+        let mut targets: Vec<FolderRecord> = self
+            .account_folders
+            .iter()
+            .filter(|folder| folder.id != current)
+            .cloned()
+            .collect();
+        targets.sort_by_key(folder_title);
+        let targets: Vec<&FolderRecord> = targets.iter().collect();
+        let (menu, group) = build_move_menu(&targets, sender);
+        self.move_menu = Some(menu);
+        self.move_actions = Some(group);
+        self.move_menu_dirty.set(true);
+    }
+
+    fn reload_folder(&self, folder_id: i64) {
+        self.folder_tree.emit(FolderTreeMsg::Reload);
+        if self.selected_folder_id == Some(folder_id) {
+            self.message_list.emit(MessageListMsg::Load { folder_id });
+        }
+    }
+
+    fn apply_flag_change(
+        &self,
+        folder_id: i64,
+        uids: Vec<u32>,
+        set: i64,
+        clear: i64,
+        change: FlagChange,
+        sender: &ComponentSender<Self>,
+    ) {
+        let store = self.store.clone();
+        let refresh_sender = sender.clone();
+        let stored = uids.clone();
+        sender.oneshot_command(async move {
+            if let Err(err) = store
+                .update_message_flags(folder_id, &stored, set, clear)
+                .await
+            {
+                debug!(detail = %err, "failed to update message flags");
+            }
+            refresh_sender.input(WindowMsg::MessagesChanged { folder_id });
+        });
+        self.sync_service
+            .emit(SyncServiceMsg::MessageAction(MessageAction::SetFlags {
+                folder_id,
+                uids,
+                change,
+            }));
+    }
+
+    fn remove_message(&self, folder_id: i64, uid: u32, sender: &ComponentSender<Self>) {
+        let store = self.store.clone();
+        let refresh_sender = sender.clone();
+        sender.oneshot_command(async move {
+            if let Err(err) = store.delete_messages(folder_id, &[uid]).await {
+                debug!(detail = %err, "failed to remove message");
+            }
+            refresh_sender.input(WindowMsg::MessagesChanged { folder_id });
+        });
+    }
+
+    fn move_message(&mut self, target_folder_id: i64, sender: &ComponentSender<Self>) {
+        let Some(anchor) = self.anchor.clone() else {
+            return;
+        };
+        self.remove_message(anchor.folder_id, anchor.uid, sender);
+        self.sync_service
+            .emit(SyncServiceMsg::MessageAction(MessageAction::Move {
+                folder_id: anchor.folder_id,
+                target_folder_id,
+                uids: vec![anchor.uid],
+            }));
+        self.anchor = None;
+        self.conversation.emit(ConversationMsg::Clear);
+    }
+
+    fn delete_message(&mut self, sender: &ComponentSender<Self>) {
+        let Some(anchor) = self.anchor.clone() else {
+            return;
+        };
+        let trash = self
+            .account_folders
+            .iter()
+            .find(|folder| folder.special_use == Some(SpecialUse::Trash))
+            .and_then(|folder| folder.id)
+            .filter(|id| *id != anchor.folder_id);
+        match trash {
+            Some(target) => self.move_message(target, sender),
+            None => {
+                self.remove_message(anchor.folder_id, anchor.uid, sender);
+                self.sync_service
+                    .emit(SyncServiceMsg::MessageAction(MessageAction::Delete {
+                        folder_id: anchor.folder_id,
+                        uids: vec![anchor.uid],
+                    }));
+                self.anchor = None;
+                self.conversation.emit(ConversationMsg::Clear);
+            }
+        }
+    }
+}
+
+fn build_move_menu(
+    targets: &[&FolderRecord],
+    sender: &ComponentSender<Window>,
+) -> (gio::Menu, gio::SimpleActionGroup) {
+    let menu = gio::Menu::new();
+    let group = gio::SimpleActionGroup::new();
+    for folder in targets {
+        let Some(id) = folder.id else {
+            continue;
+        };
+        let action = gio::SimpleAction::new(&format!("to-{id}"), None);
+        let action_sender = sender.clone();
+        action.connect_activate(move |_, _| {
+            action_sender.input(WindowMsg::MoveMessage {
+                target_folder_id: id,
+            });
+        });
+        group.add_action(&action);
+        menu.append_item(&gio::MenuItem::new(
+            Some(&folder_title(folder)),
+            Some(&format!("move.to-{id}")),
+        ));
+    }
+    (menu, group)
+}
+
+fn folder_title(folder: &FolderRecord) -> String {
+    folder
+        .display_name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| folder.name.clone())
 }
 
 fn collapse_breakpoint(max_width: f64, widget: &impl IsA<glib::Object>) -> adw::Breakpoint {

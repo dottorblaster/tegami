@@ -6,6 +6,7 @@ use accounts::AccountManager;
 use accounts::CredentialWorker;
 use imap::ImapBackend;
 use mail_core::account::AccountConfig;
+use mail_core::envelope::FlagChange;
 use mail_core::store::Store;
 use mail_core::sync::EnvelopeWindow;
 use mail_core::worker::{AccountWorker, WorkerCommand, WorkerConfig, WorkerEvent};
@@ -19,6 +20,45 @@ pub struct ServiceAccount {
     pub account_id: i64,
     pub config: AccountConfig,
     pub credential: mail_core::Credential,
+}
+
+#[derive(Debug, Clone)]
+pub enum MessageAction {
+    SetFlags {
+        folder_id: i64,
+        uids: Vec<u32>,
+        change: FlagChange,
+    },
+    Delete {
+        folder_id: i64,
+        uids: Vec<u32>,
+    },
+    Move {
+        folder_id: i64,
+        target_folder_id: i64,
+        uids: Vec<u32>,
+    },
+}
+
+#[derive(Debug)]
+pub enum ResolvedAction {
+    SetFlags {
+        account_id: i64,
+        folder: String,
+        uids: Vec<u32>,
+        change: FlagChange,
+    },
+    Delete {
+        account_id: i64,
+        folder: String,
+        uids: Vec<u32>,
+    },
+    Move {
+        account_id: i64,
+        from: String,
+        to: String,
+        uids: Vec<u32>,
+    },
 }
 
 #[derive(Debug)]
@@ -42,6 +82,8 @@ pub enum SyncServiceMsg {
         folder: String,
         uid: u32,
     },
+    MessageAction(MessageAction),
+    MessageActionResolved(ResolvedAction),
     Failed {
         detail: String,
     },
@@ -146,6 +188,38 @@ impl SyncService {
             worker.send(WorkerCommand::Watch { folder });
         }
     }
+
+    fn dispatch(&self, action: ResolvedAction) {
+        let (account_id, command) = match action {
+            ResolvedAction::SetFlags {
+                account_id,
+                folder,
+                uids,
+                change,
+            } => (
+                account_id,
+                WorkerCommand::SetFlags {
+                    folder,
+                    uids,
+                    change,
+                },
+            ),
+            ResolvedAction::Delete {
+                account_id,
+                folder,
+                uids,
+            } => (account_id, WorkerCommand::Delete { folder, uids }),
+            ResolvedAction::Move {
+                account_id,
+                from,
+                to,
+                uids,
+            } => (account_id, WorkerCommand::Move { from, to, uids }),
+        };
+        if let Some(worker) = self.workers.get(&account_id) {
+            worker.send(command);
+        }
+    }
 }
 
 impl SimpleComponent for SyncService {
@@ -223,10 +297,73 @@ impl SimpleComponent for SyncService {
                     worker.send(WorkerCommand::FetchBody { folder, uid });
                 }
             }
+            SyncServiceMsg::MessageAction(action) => {
+                let store = self.store.clone();
+                let action_sender = sender.clone();
+                sender.oneshot_command(async move {
+                    match resolve_action(&store, action).await {
+                        Ok(action) => {
+                            action_sender.input(SyncServiceMsg::MessageActionResolved(action))
+                        }
+                        Err(detail) => debug!(detail, "cannot resolve message action"),
+                    }
+                });
+            }
+            SyncServiceMsg::MessageActionResolved(action) => {
+                self.dispatch(action);
+            }
             SyncServiceMsg::Failed { detail } => {
                 warn!(detail, "account discovery failed");
                 let _ = sender.output(SyncServiceOutput::Error { detail });
             }
+        }
+    }
+}
+
+async fn resolve_folder(store: &Store, folder_id: i64) -> Result<(i64, String), String> {
+    match store.folder(folder_id).await {
+        Ok(Some(folder)) => Ok((folder.account_id, folder.name)),
+        Ok(None) => Err(format!("unknown folder {folder_id}")),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+async fn resolve_action(store: &Store, action: MessageAction) -> Result<ResolvedAction, String> {
+    match action {
+        MessageAction::SetFlags {
+            folder_id,
+            uids,
+            change,
+        } => {
+            let (account_id, folder) = resolve_folder(store, folder_id).await?;
+            Ok(ResolvedAction::SetFlags {
+                account_id,
+                folder,
+                uids,
+                change,
+            })
+        }
+        MessageAction::Delete { folder_id, uids } => {
+            let (account_id, folder) = resolve_folder(store, folder_id).await?;
+            Ok(ResolvedAction::Delete {
+                account_id,
+                folder,
+                uids,
+            })
+        }
+        MessageAction::Move {
+            folder_id,
+            target_folder_id,
+            uids,
+        } => {
+            let (account_id, from) = resolve_folder(store, folder_id).await?;
+            let (_, to) = resolve_folder(store, target_folder_id).await?;
+            Ok(ResolvedAction::Move {
+                account_id,
+                from,
+                to,
+                uids,
+            })
         }
     }
 }
@@ -309,4 +446,133 @@ fn start_watcher(store: Arc<Store>, sender: &ComponentSender<SyncService>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mail_core::store::{AccountRecord, AccountSource, AuthKind, FolderRecord};
+
+    fn account() -> AccountRecord {
+        AccountRecord {
+            id: None,
+            source: AccountSource::Goa,
+            external_id: "account_1".to_string(),
+            email: "user@example.org".to_string(),
+            display_name: None,
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            auth_kind: AuthKind::Password,
+            username: None,
+        }
+    }
+
+    fn folder(account_id: i64, name: &str) -> FolderRecord {
+        FolderRecord {
+            id: None,
+            account_id,
+            name: name.to_string(),
+            display_name: None,
+            special_use: None,
+            uidvalidity: None,
+            uidnext: None,
+            highestmodseq: None,
+            unread_count: 0,
+            total_count: 0,
+            subscribed: true,
+        }
+    }
+
+    async fn seeded() -> (Store, i64, i64, i64) {
+        let store = Store::open(":memory:").unwrap();
+        let account_id = store.upsert_account(account()).await.unwrap();
+        let inbox = store
+            .upsert_folder(folder(account_id, "INBOX"))
+            .await
+            .unwrap();
+        let archive = store
+            .upsert_folder(folder(account_id, "Archive"))
+            .await
+            .unwrap();
+        (store, account_id, inbox, archive)
+    }
+
+    #[tokio::test]
+    async fn resolves_flags_move_and_delete_actions() {
+        let (store, account_id, inbox, archive) = seeded().await;
+
+        let action = MessageAction::SetFlags {
+            folder_id: inbox,
+            uids: vec![3],
+            change: FlagChange {
+                flagged: Some(true),
+                ..FlagChange::default()
+            },
+        };
+        match resolve_action(&store, action).await.unwrap() {
+            ResolvedAction::SetFlags {
+                account_id: resolved,
+                folder,
+                uids,
+                change,
+            } => {
+                assert_eq!(resolved, account_id);
+                assert_eq!(folder, "INBOX");
+                assert_eq!(uids, vec![3]);
+                assert_eq!(change.flagged, Some(true));
+            }
+            other => panic!("unexpected action {other:?}"),
+        }
+
+        let action = MessageAction::Move {
+            folder_id: inbox,
+            target_folder_id: archive,
+            uids: vec![4],
+        };
+        match resolve_action(&store, action).await.unwrap() {
+            ResolvedAction::Move {
+                account_id: resolved,
+                from,
+                to,
+                uids,
+            } => {
+                assert_eq!(resolved, account_id);
+                assert_eq!(from, "INBOX");
+                assert_eq!(to, "Archive");
+                assert_eq!(uids, vec![4]);
+            }
+            other => panic!("unexpected action {other:?}"),
+        }
+
+        let action = MessageAction::Delete {
+            folder_id: inbox,
+            uids: vec![5],
+        };
+        match resolve_action(&store, action).await.unwrap() {
+            ResolvedAction::Delete {
+                account_id: resolved,
+                folder,
+                uids,
+            } => {
+                assert_eq!(resolved, account_id);
+                assert_eq!(folder, "INBOX");
+                assert_eq!(uids, vec![5]);
+            }
+            other => panic!("unexpected action {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_unknown_folders() {
+        let (store, _, _, _) = seeded().await;
+        let action = MessageAction::Delete {
+            folder_id: 999,
+            uids: vec![1],
+        };
+        assert!(resolve_action(&store, action).await.is_err());
+    }
 }

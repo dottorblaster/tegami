@@ -105,6 +105,7 @@ pub enum MessageCardMsg {
     ToggleQuote,
     ToggleView,
     Refresh,
+    MarkRead,
     LoadRemoteOnce,
     AllowSender,
     LaunchAttachment { path: PathBuf },
@@ -362,6 +363,7 @@ impl FactoryComponent for MessageCard {
             MessageCardMsg::Toggle => self.expanded = !self.expanded,
             MessageCardMsg::ToggleQuote => self.quote_visible = !self.quote_visible,
             MessageCardMsg::ToggleView => self.view = self.view.other(),
+            MessageCardMsg::MarkRead => self.unread = false,
             MessageCardMsg::Refresh => {}
             MessageCardMsg::LoadRemoteOnce => self.remote_allowed = true,
             MessageCardMsg::AllowSender => {
@@ -616,6 +618,20 @@ impl ViewState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorState {
+    pub folder_id: i64,
+    pub account_id: i64,
+    pub uid: u32,
+    pub flagged: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConversationContent {
+    pub cards: Vec<MessageCard>,
+    pub anchor: Option<AnchorState>,
+}
+
 #[derive(Debug)]
 pub enum ConversationMsg {
     Load {
@@ -625,7 +641,7 @@ pub enum ConversationMsg {
     Loaded {
         folder_id: i64,
         uid: u32,
-        result: Result<Vec<MessageCard>, String>,
+        result: Result<ConversationContent, String>,
     },
     BodyFetched {
         message_id: i64,
@@ -638,12 +654,15 @@ pub enum ConversationMsg {
     AllowSender {
         sender: String,
     },
+    Clear,
     Retry,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConversationOutput {
     FetchBody { folder_id: i64, uid: u32 },
+    Anchor(Option<AnchorState>),
+    Viewed { folder_id: i64, uids: Vec<u32> },
 }
 
 pub struct Conversation {
@@ -744,6 +763,7 @@ impl SimpleComponent for Conversation {
                 self.selection = Some((folder_id, uid));
                 self.state = ViewState::Loading;
                 self.list.guard().clear();
+                let _ = sender.output(ConversationOutput::Anchor(None));
                 let store = self.store.clone();
                 let load_sender = sender.clone();
                 sender.oneshot_command(async move {
@@ -765,24 +785,48 @@ impl SimpleComponent for Conversation {
                 }
                 self.list.guard().clear();
                 match result {
-                    Ok(cards) if cards.is_empty() => {
-                        self.state = ViewState::Empty;
-                    }
-                    Ok(cards) => {
-                        let pending: Vec<(i64, u32)> = cards
+                    Ok(content) => {
+                        let anchor = content.anchor;
+                        let unread: Vec<usize> = content
+                            .cards
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, card)| card.unread)
+                            .map(|(index, _)| index)
+                            .collect();
+                        let viewed: Vec<u32> = unread
+                            .iter()
+                            .filter_map(|index| content.cards.get(*index).map(|card| card.uid))
+                            .collect();
+                        let pending: Vec<(i64, u32)> = content
+                            .cards
                             .iter()
                             .filter(|card| card.body.status == BodyStatus::Pending)
                             .map(|card| (card.folder_id, card.uid))
                             .collect();
+                        self.state = if content.cards.is_empty() {
+                            ViewState::Empty
+                        } else {
+                            ViewState::Ready
+                        };
                         let mut guard = self.list.guard();
-                        for card in cards {
+                        for card in content.cards {
                             guard.push_back(card);
                         }
                         drop(guard);
                         for index in 0..self.list.len() {
                             self.list.send(index, MessageCardMsg::Refresh);
                         }
-                        self.state = ViewState::Ready;
+                        for index in unread {
+                            self.list.send(index, MessageCardMsg::MarkRead);
+                        }
+                        let _ = sender.output(ConversationOutput::Anchor(anchor));
+                        if !viewed.is_empty() {
+                            let _ = sender.output(ConversationOutput::Viewed {
+                                folder_id,
+                                uids: viewed,
+                            });
+                        }
                         for (folder_id, uid) in pending {
                             let _ = sender.output(ConversationOutput::FetchBody { folder_id, uid });
                         }
@@ -790,6 +834,7 @@ impl SimpleComponent for Conversation {
                     Err(detail) => {
                         debug!(detail, "failed to load conversation");
                         self.state = ViewState::Error;
+                        let _ = sender.output(ConversationOutput::Anchor(None));
                     }
                 }
             }
@@ -829,6 +874,12 @@ impl SimpleComponent for Conversation {
                     }
                 });
             }
+            ConversationMsg::Clear => {
+                self.selection = None;
+                self.state = ViewState::Idle;
+                self.list.guard().clear();
+                let _ = sender.output(ConversationOutput::Anchor(None));
+            }
             ConversationMsg::Retry => {
                 if let Some((folder_id, uid)) = self.selection {
                     sender.input(ConversationMsg::Load { folder_id, uid });
@@ -851,7 +902,7 @@ async fn load_conversation(
     store: &Store,
     folder_id: i64,
     uid: u32,
-) -> Result<Vec<MessageCard>, String> {
+) -> Result<ConversationContent, String> {
     let anchor = store
         .message(folder_id, uid)
         .await
@@ -862,7 +913,7 @@ async fn load_conversation(
             .thread_messages(thread_id)
             .await
             .map_err(|err| err.to_string())?,
-        None => vec![anchor],
+        None => vec![anchor.clone()],
     };
     let allowed: HashSet<String> = store
         .remote_content_senders()
@@ -870,6 +921,11 @@ async fn load_conversation(
         .map_err(|err| err.to_string())?
         .into_iter()
         .collect();
+    let account_id = store
+        .folder(folder_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .map(|folder| folder.account_id);
     let now = glib::DateTime::now_local()
         .or_else(|_| glib::DateTime::from_unix_utc(0))
         .expect("the Unix epoch is always a valid timestamp");
@@ -877,7 +933,13 @@ async fn load_conversation(
     for record in &records {
         cards.push(message_card(record, &now, &allowed).await);
     }
-    Ok(cards)
+    let anchor = account_id.map(|account_id| AnchorState {
+        folder_id,
+        account_id,
+        uid,
+        flagged: bits_to_flags(anchor.flags).flagged,
+    });
+    Ok(ConversationContent { cards, anchor })
 }
 
 async fn message_card(

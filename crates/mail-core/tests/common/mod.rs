@@ -26,6 +26,7 @@ pub struct FakeBackend {
     pub idle_supported: bool,
     pub idle_delay: Duration,
     pub connected: bool,
+    pub fail_connect: bool,
 }
 
 impl Default for FakeBackend {
@@ -45,6 +46,7 @@ impl Default for FakeBackend {
             idle_supported: false,
             idle_delay: Duration::from_millis(5),
             connected: false,
+            fail_connect: false,
         }
     }
 }
@@ -150,6 +152,9 @@ impl FakeBackend {
 
 impl MailBackend for FakeBackend {
     async fn connect(&mut self, _config: &AccountConfig, _credential: &Credential) -> Result<()> {
+        if self.fail_connect {
+            return Err(MailError::Protocol("offline".to_string()));
+        }
         if self.connected {
             return Err(MailError::Protocol("already connected".to_string()));
         }

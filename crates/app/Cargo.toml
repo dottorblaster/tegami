@@ -26,3 +26,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 webkit6 = { version = "0.6", features = ["v2_46"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -139,6 +139,13 @@ enum Command {
         flags: i64,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    UpdateMessageFlags {
+        folder_id: i64,
+        uids: Vec<u32>,
+        set: i64,
+        clear: i64,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     RemoteContentSenders {
         reply: oneshot::Sender<StoreResult<Vec<String>>>,
     },
@@ -419,6 +426,25 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn update_message_flags(
+        &self,
+        folder_id: i64,
+        uids: &[u32],
+        set: i64,
+        clear: i64,
+    ) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::UpdateMessageFlags {
+            folder_id,
+            uids: uids.to_vec(),
+            set,
+            clear,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn remote_content_senders(&self) -> StoreResult<Vec<String>> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::RemoteContentSenders { reply }).await?;
@@ -566,6 +592,16 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
             } => reply_send(
                 reply,
                 set_message_flags(&connection, folder_id, &uids, flags),
+            ),
+            Command::UpdateMessageFlags {
+                folder_id,
+                uids,
+                set,
+                clear,
+                reply,
+            } => reply_send(
+                reply,
+                update_message_flags(&connection, folder_id, &uids, set, clear),
             ),
             Command::RemoteContentSenders { reply } => {
                 reply_send(reply, remote_content_senders(&connection))
@@ -911,6 +947,32 @@ fn attachments(connection: &Connection, message_id: i64) -> StoreResult<Vec<Atta
         .query_map([message_id], AttachmentRecord::from_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+fn update_message_flags(
+    connection: &Connection,
+    folder_id: i64,
+    uids: &[u32],
+    set: i64,
+    clear: i64,
+) -> StoreResult<()> {
+    if uids.is_empty() {
+        return Ok(());
+    }
+    let placeholders = uids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "UPDATE message SET flags = (flags | ?1) & ~?2 \
+         WHERE folder_id = ?3 AND uid IN ({placeholders})"
+    );
+    let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(uids.len() + 3);
+    params.push(&set);
+    params.push(&clear);
+    params.push(&folder_id);
+    for uid in uids {
+        params.push(uid);
+    }
+    connection.execute(&sql, rusqlite::params_from_iter(params.iter()))?;
+    Ok(())
 }
 
 fn enqueue_op(connection: &Connection, op: &PendingOpRecord) -> StoreResult<i64> {

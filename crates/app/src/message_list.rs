@@ -222,6 +222,8 @@ pub struct MessageList {
     store: Arc<Store>,
     list: TypedListView<MessageRow, gtk::SingleSelection>,
     folder_id: Option<i64>,
+    selected_uid: Option<u32>,
+    restoring: bool,
     state: ListState,
 }
 
@@ -304,6 +306,8 @@ impl SimpleComponent for MessageList {
             store,
             list,
             folder_id: None,
+            selected_uid: None,
+            restoring: false,
             state: ListState::Idle,
         };
         let list_view = &model.list.view;
@@ -315,6 +319,9 @@ impl SimpleComponent for MessageList {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             MessageListMsg::Load { folder_id } => {
+                if self.folder_id != Some(folder_id) {
+                    self.selected_uid = None;
+                }
                 self.folder_id = Some(folder_id);
                 self.state = ListState::Loading;
                 self.list.clear();
@@ -329,19 +336,28 @@ impl SimpleComponent for MessageList {
                 if self.folder_id != Some(folder_id) {
                     return;
                 }
+                self.restoring = true;
                 self.list.clear();
                 match result {
                     Ok(rows) if rows.is_empty() => {
+                        self.selected_uid = None;
                         self.state = ListState::Empty;
                     }
                     Ok(rows) => {
                         self.state = ListState::Ready;
                         self.list.extend_from_iter(rows);
+                        self.restore_selection();
                     }
                     Err(detail) => {
                         debug!(folder_id, detail, "failed to load messages");
+                        self.selected_uid = None;
                         self.state = ListState::Error(detail);
                     }
+                }
+                let reemit = self.selected_uid.is_none() && self.state == ListState::Ready;
+                self.restoring = false;
+                if reemit {
+                    sender.input(MessageListMsg::SelectionChanged);
                 }
             }
             MessageListMsg::Retry => {
@@ -350,14 +366,22 @@ impl SimpleComponent for MessageList {
                 }
             }
             MessageListMsg::SelectionChanged => {
+                if self.restoring {
+                    return;
+                }
                 let Some(folder_id) = self.folder_id else {
                     return;
                 };
                 let position = self.list.selection_model.selected();
                 let Some(item) = self.list.get_visible(position) else {
+                    self.selected_uid = None;
                     return;
                 };
                 let uid = item.borrow().uid;
+                if self.selected_uid == Some(uid) {
+                    return;
+                }
+                self.selected_uid = Some(uid);
                 let _ = sender.output(MessageListOutput::Selected { folder_id, uid });
             }
         }
@@ -365,6 +389,21 @@ impl SimpleComponent for MessageList {
 }
 
 impl MessageList {
+    fn restore_selection(&mut self) {
+        let Some(uid) = self.selected_uid else {
+            return;
+        };
+        let mut position = 0;
+        while let Some(item) = self.list.get_visible(position) {
+            if item.borrow().uid == uid {
+                self.list.selection_model.set_selected(position);
+                return;
+            }
+            position += 1;
+        }
+        self.selected_uid = None;
+    }
+
     fn empty_title(&self) -> &'static str {
         if self.folder_id.is_some() {
             "No messages"

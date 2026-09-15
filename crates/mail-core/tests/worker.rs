@@ -5,7 +5,9 @@ use std::time::Duration;
 use common::FakeBackend;
 use mail_core::account::AccountConfig;
 use mail_core::envelope::FlagChange;
-use mail_core::store::{AccountRecord, AccountSource, AuthKind, BodyState, FLAG_SEEN, Store};
+use mail_core::store::{
+    AccountRecord, AccountSource, AuthKind, BodyState, FLAG_SEEN, OpKind, Store,
+};
 use mail_core::sync::{EnvelopeWindow, IdleEvent, ReplayReport, queue_set_flags};
 use mail_core::worker::{AccountWorker, WorkerCommand, WorkerConfig, WorkerEvent};
 use tempfile::TempDir;
@@ -280,5 +282,96 @@ async fn worker_watches_inbox_and_resyncs_on_idle_signal() {
         }
     }
     assert!(saw_idle_change);
+    worker.shutdown();
+}
+
+fn folder_record(account_id: i64, name: &str) -> mail_core::store::FolderRecord {
+    mail_core::store::FolderRecord {
+        id: None,
+        account_id,
+        name: name.to_string(),
+        display_name: None,
+        special_use: None,
+        uidvalidity: None,
+        uidnext: None,
+        highestmodseq: None,
+        unread_count: 0,
+        total_count: 0,
+        subscribed: true,
+    }
+}
+
+async fn recv_queued(events: &mut mpsc::UnboundedReceiver<WorkerEvent>) -> WorkerEvent {
+    loop {
+        let event = recv(events).await;
+        if matches!(event, WorkerEvent::OfflineQueued { .. }) {
+            return event;
+        }
+    }
+}
+
+#[tokio::test]
+async fn worker_queues_actions_while_offline() {
+    let mut backend = FakeBackend::new();
+    backend.fail_connect = true;
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let inbox = store
+        .upsert_folder(folder_record(account_id, "INBOX"))
+        .await
+        .unwrap();
+    let archive = store
+        .upsert_folder(folder_record(account_id, "Archive"))
+        .await
+        .unwrap();
+    let temp = TempDir::new().unwrap();
+    let (mut worker, mut events) = AccountWorker::spawn(
+        backend,
+        store.clone(),
+        worker_config(account_id, temp.path()),
+    );
+
+    worker.send(WorkerCommand::SetFlags {
+        folder: "INBOX".to_string(),
+        uids: vec![7],
+        change: FlagChange {
+            seen: Some(true),
+            ..FlagChange::default()
+        },
+    });
+    assert!(matches!(
+        recv_queued(&mut events).await,
+        WorkerEvent::OfflineQueued { .. }
+    ));
+    worker.send(WorkerCommand::Move {
+        from: "INBOX".to_string(),
+        to: "Archive".to_string(),
+        uids: vec![8],
+    });
+    assert!(matches!(
+        recv_queued(&mut events).await,
+        WorkerEvent::OfflineQueued { .. }
+    ));
+    worker.send(WorkerCommand::Delete {
+        folder: "INBOX".to_string(),
+        uids: vec![9],
+    });
+    assert!(matches!(
+        recv_queued(&mut events).await,
+        WorkerEvent::OfflineQueued { .. }
+    ));
+
+    let ops = store.pending_ops(account_id).await.unwrap();
+    assert_eq!(ops.len(), 3);
+    assert_eq!(ops[0].kind, OpKind::SetFlags);
+    assert_eq!(ops[0].folder_id, Some(inbox));
+    assert_eq!(ops[0].uid, Some(7));
+    assert_eq!(ops[0].payload.as_deref(), Some("+...."));
+    assert_eq!(ops[1].kind, OpKind::Move);
+    assert_eq!(ops[1].target_folder_id, Some(archive));
+    assert_eq!(ops[1].uid, Some(8));
+    assert_eq!(ops[2].kind, OpKind::Delete);
+    assert_eq!(ops[2].uid, Some(9));
+
     worker.shutdown();
 }
