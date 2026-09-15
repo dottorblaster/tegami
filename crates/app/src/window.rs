@@ -72,7 +72,7 @@ impl SimpleComponent for Window {
                         set_vexpand: true,
 
                         #[local_ref]
-                        folder_tree -> gtk::ScrolledWindow {
+                        folder_tree -> adw::ViewStack {
                             set_vexpand: true,
                             set_hexpand: true,
                         },
@@ -110,7 +110,7 @@ impl SimpleComponent for Window {
                                 set_vexpand: true,
 
                                 #[local_ref]
-                                message_list -> gtk::ScrolledWindow {
+                                message_list -> adw::ViewStack {
                                     set_vexpand: true,
                                     set_hexpand: true,
                                 },

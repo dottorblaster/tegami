@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use mail_core::store::{AccountRecord, FolderRecord, SpecialUse, Store};
+use relm4::adw;
 use relm4::factory::{FactoryComponent, FactorySender, FactoryVecDeque};
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
@@ -134,16 +135,36 @@ impl FolderRow {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarState {
+    Loading,
+    Empty,
+    Ready,
+    Error(String),
+}
+
+impl SidebarState {
+    fn page_name(&self) -> &'static str {
+        match self {
+            Self::Loading => "loading",
+            Self::Empty => "empty",
+            Self::Ready => "folders",
+            Self::Error(_) => "error",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum FolderTreeMsg {
     Reload,
-    Loaded(Vec<SidebarRow>),
+    Loaded(Result<Vec<SidebarRow>, String>),
     Selected { key: FolderKey, title: String },
 }
 
 pub struct FolderTree {
     rows: FactoryVecDeque<FolderRow>,
     store: Arc<Store>,
+    state: SidebarState,
 }
 
 #[relm4::component(pub)]
@@ -154,18 +175,60 @@ impl SimpleComponent for FolderTree {
 
     view! {
         #[root]
-        gtk::ScrolledWindow {
+        adw::ViewStack {
             set_vexpand: true,
             set_hexpand: true,
-            set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
 
-            #[local_ref]
-            rows -> gtk::ListBox {
+            add_named[Some("folders")] = &gtk::ScrolledWindow {
                 set_vexpand: true,
                 set_hexpand: true,
-                add_css_class: relm4::css::NAVIGATION_SIDEBAR,
-                set_selection_mode: gtk::SelectionMode::Single,
+                set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+
+                #[local_ref]
+                rows -> gtk::ListBox {
+                    set_vexpand: true,
+                    set_hexpand: true,
+                    add_css_class: relm4::css::NAVIGATION_SIDEBAR,
+                    set_selection_mode: gtk::SelectionMode::Single,
+                },
             },
+
+            add_named[Some("loading")] = &adw::StatusPage {
+                set_title: "Loading accounts…",
+
+                #[wrap(Some)]
+                set_child = &adw::Spinner {
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+                },
+            },
+
+            add_named[Some("empty")] = &adw::StatusPage {
+                set_icon_name: Some("mail-symbolic"),
+                set_title: "No accounts",
+                set_description: Some("Add a mail account in Settings to get started."),
+            },
+
+            add_named[Some("error")] = &adw::StatusPage {
+                set_icon_name: Some("dialog-warning-symbolic"),
+                set_title: "Couldn't load accounts",
+                #[watch]
+                set_description: Some(model.error_message()),
+
+                #[wrap(Some)]
+                set_child = &gtk::Button {
+                    set_label: "Try Again",
+                    set_halign: gtk::Align::Center,
+                    add_css_class: "pill",
+
+                    connect_clicked[sender] => move |_| {
+                        sender.input(FolderTreeMsg::Reload);
+                    },
+                },
+            },
+
+            #[watch]
+            set_visible_child_name: model.state.page_name(),
         }
     }
 
@@ -182,7 +245,11 @@ impl SimpleComponent for FolderTree {
                         FolderTreeMsg::Selected { key, title }
                     }
                 });
-        let model = FolderTree { rows, store };
+        let model = FolderTree {
+            rows,
+            store,
+            state: SidebarState::Loading,
+        };
         let rows = model.rows.widget();
         let widgets = view_output!();
 
@@ -194,20 +261,33 @@ impl SimpleComponent for FolderTree {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             FolderTreeMsg::Reload => {
+                if self.state != SidebarState::Ready {
+                    self.state = SidebarState::Loading;
+                }
                 let store = self.store.clone();
                 let reload_sender = sender.clone();
                 sender.oneshot_command(async move {
-                    let rows = load_rows(&store).await;
-                    reload_sender.input(FolderTreeMsg::Loaded(rows));
+                    let result = load_rows(&store).await;
+                    reload_sender.input(FolderTreeMsg::Loaded(result));
                 });
             }
-            FolderTreeMsg::Loaded(rows) => {
-                let mut guard = self.rows.guard();
-                guard.clear();
-                for row in rows {
-                    guard.push_back(row);
+            FolderTreeMsg::Loaded(result) => match result {
+                Ok(rows) if rows.is_empty() => {
+                    self.state = SidebarState::Empty;
                 }
-            }
+                Ok(rows) => {
+                    self.state = SidebarState::Ready;
+                    let mut guard = self.rows.guard();
+                    guard.clear();
+                    for row in rows {
+                        guard.push_back(row);
+                    }
+                }
+                Err(detail) => {
+                    debug!(detail, "failed to load accounts");
+                    self.state = SidebarState::Error(detail);
+                }
+            },
             FolderTreeMsg::Selected { key, title } => {
                 let _ = sender.output(FolderTreeOutput::Selected { key, title });
             }
@@ -215,14 +295,17 @@ impl SimpleComponent for FolderTree {
     }
 }
 
-async fn load_rows(store: &Store) -> Vec<SidebarRow> {
-    let accounts = match store.accounts().await {
-        Ok(accounts) => accounts,
-        Err(err) => {
-            debug!("failed to load accounts: {err}");
-            return Vec::new();
+impl FolderTree {
+    fn error_message(&self) -> &str {
+        match &self.state {
+            SidebarState::Error(detail) => detail,
+            _ => "Something went wrong while reading your accounts.",
         }
-    };
+    }
+}
+
+async fn load_rows(store: &Store) -> Result<Vec<SidebarRow>, String> {
+    let accounts = store.accounts().await.map_err(|err| err.to_string())?;
     let mut rows = Vec::new();
     for account in accounts {
         let account_id = account.id.unwrap_or_default();
@@ -235,7 +318,7 @@ async fn load_rows(store: &Store) -> Vec<SidebarRow> {
         };
         rows.extend(account_rows(&account, folders));
     }
-    rows
+    Ok(rows)
 }
 
 fn account_rows(account: &AccountRecord, mut folders: Vec<FolderRecord>) -> Vec<SidebarRow> {
@@ -411,5 +494,13 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn sidebar_state_maps_to_stack_page() {
+        assert_eq!(SidebarState::Loading.page_name(), "loading");
+        assert_eq!(SidebarState::Empty.page_name(), "empty");
+        assert_eq!(SidebarState::Ready.page_name(), "folders");
+        assert_eq!(SidebarState::Error("boom".to_string()).page_name(), "error");
     }
 }

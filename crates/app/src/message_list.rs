@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use mail_core::store::{MessageRecord, Store, bits_to_flags};
+use relm4::adw;
 use relm4::gtk;
 use relm4::gtk::glib;
 use relm4::gtk::prelude::*;
@@ -181,6 +182,26 @@ impl RelmListItem for MessageRow {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListState {
+    Idle,
+    Loading,
+    Empty,
+    Ready,
+    Error(String),
+}
+
+impl ListState {
+    fn page_name(&self) -> &'static str {
+        match self {
+            Self::Idle | Self::Empty => "empty",
+            Self::Loading => "loading",
+            Self::Ready => "messages",
+            Self::Error(_) => "error",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum MessageListMsg {
     Load {
@@ -188,8 +209,9 @@ pub enum MessageListMsg {
     },
     Loaded {
         folder_id: i64,
-        rows: Vec<MessageRow>,
+        result: Result<Vec<MessageRow>, String>,
     },
+    Retry,
     SelectionChanged,
 }
 
@@ -202,6 +224,7 @@ pub struct MessageList {
     store: Arc<Store>,
     list: TypedListView<MessageRow, gtk::SingleSelection>,
     folder_id: Option<i64>,
+    state: ListState,
 }
 
 #[relm4::component(pub)]
@@ -212,15 +235,59 @@ impl SimpleComponent for MessageList {
 
     view! {
         #[root]
-        gtk::ScrolledWindow {
+        adw::ViewStack {
             set_vexpand: true,
             set_hexpand: true,
-            set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
 
-            #[local_ref]
-            list_view -> gtk::ListView {
-                add_css_class: "message-list",
+            add_named[Some("messages")] = &gtk::ScrolledWindow {
+                set_vexpand: true,
+                set_hexpand: true,
+                set_policy: (gtk::PolicyType::Never, gtk::PolicyType::Automatic),
+
+                #[local_ref]
+                list_view -> gtk::ListView {
+                    add_css_class: "message-list",
+                },
             },
+
+            add_named[Some("loading")] = &adw::StatusPage {
+                set_title: "Loading messages…",
+
+                #[wrap(Some)]
+                set_child = &adw::Spinner {
+                    set_halign: gtk::Align::Center,
+                    set_valign: gtk::Align::Center,
+                },
+            },
+
+            add_named[Some("empty")] = &adw::StatusPage {
+                set_icon_name: Some("mail-symbolic"),
+                #[watch]
+                set_title: model.empty_title(),
+                #[watch]
+                set_description: Some(model.empty_description()),
+            },
+
+            add_named[Some("error")] = &adw::StatusPage {
+                set_icon_name: Some("dialog-warning-symbolic"),
+                set_title: "Couldn't load messages",
+                #[watch]
+                set_description: Some(model.error_message()),
+
+                #[wrap(Some)]
+                set_child = &gtk::Button {
+                    set_label: "Try Again",
+                    set_halign: gtk::Align::Center,
+                    add_css_class: "pill",
+
+                    connect_clicked[sender] => move |_| {
+                        sender.input(MessageListMsg::Retry);
+                    },
+                },
+            },
+
+            #[watch]
+            set_visible_child_name: model.state.page_name(),
         }
     }
 
@@ -239,6 +306,7 @@ impl SimpleComponent for MessageList {
             store,
             list,
             folder_id: None,
+            state: ListState::Idle,
         };
         let list_view = &model.list.view;
         let widgets = view_output!();
@@ -250,20 +318,38 @@ impl SimpleComponent for MessageList {
         match msg {
             MessageListMsg::Load { folder_id } => {
                 self.folder_id = Some(folder_id);
+                self.state = ListState::Loading;
                 self.list.clear();
                 let store = self.store.clone();
                 let load_sender = sender.clone();
                 sender.oneshot_command(async move {
-                    let rows = load_rows(&store, folder_id).await;
-                    load_sender.input(MessageListMsg::Loaded { folder_id, rows });
+                    let result = load_rows(&store, folder_id).await;
+                    load_sender.input(MessageListMsg::Loaded { folder_id, result });
                 });
             }
-            MessageListMsg::Loaded { folder_id, rows } => {
+            MessageListMsg::Loaded { folder_id, result } => {
                 if self.folder_id != Some(folder_id) {
                     return;
                 }
                 self.list.clear();
-                self.list.extend_from_iter(rows);
+                match result {
+                    Ok(rows) if rows.is_empty() => {
+                        self.state = ListState::Empty;
+                    }
+                    Ok(rows) => {
+                        self.state = ListState::Ready;
+                        self.list.extend_from_iter(rows);
+                    }
+                    Err(detail) => {
+                        debug!(folder_id, detail, "failed to load messages");
+                        self.state = ListState::Error(detail);
+                    }
+                }
+            }
+            MessageListMsg::Retry => {
+                if let Some(folder_id) = self.folder_id {
+                    sender.input(MessageListMsg::Load { folder_id });
+                }
             }
             MessageListMsg::SelectionChanged => {
                 let Some(folder_id) = self.folder_id else {
@@ -280,21 +366,43 @@ impl SimpleComponent for MessageList {
     }
 }
 
-async fn load_rows(store: &Store, folder_id: i64) -> Vec<MessageRow> {
-    let messages = match store.messages(folder_id).await {
-        Ok(messages) => messages,
-        Err(err) => {
-            debug!("failed to load messages for folder {folder_id}: {err}");
-            return Vec::new();
+impl MessageList {
+    fn empty_title(&self) -> &'static str {
+        if self.folder_id.is_some() {
+            "No messages"
+        } else {
+            "No folder selected"
         }
-    };
+    }
+
+    fn empty_description(&self) -> &'static str {
+        if self.folder_id.is_some() {
+            "This folder is empty."
+        } else {
+            "Choose a folder from the sidebar to read your mail."
+        }
+    }
+
+    fn error_message(&self) -> &str {
+        match &self.state {
+            ListState::Error(detail) => detail,
+            _ => "Something went wrong while syncing this folder.",
+        }
+    }
+}
+
+async fn load_rows(store: &Store, folder_id: i64) -> Result<Vec<MessageRow>, String> {
+    let messages = store
+        .messages(folder_id)
+        .await
+        .map_err(|err| err.to_string())?;
     let now = glib::DateTime::now_local()
         .or_else(|_| glib::DateTime::from_unix_utc(0))
         .expect("the Unix epoch is always a valid timestamp");
-    messages
+    Ok(messages
         .iter()
         .map(|message| MessageRow::from_record(message, &now))
-        .collect()
+        .collect())
 }
 
 fn display_subject(subject: &str) -> String {
@@ -460,5 +568,14 @@ mod tests {
 
         assert!(dated < undated);
         assert_eq!(undated.date, "");
+    }
+
+    #[test]
+    fn list_state_maps_to_stack_page() {
+        assert_eq!(ListState::Idle.page_name(), "empty");
+        assert_eq!(ListState::Empty.page_name(), "empty");
+        assert_eq!(ListState::Loading.page_name(), "loading");
+        assert_eq!(ListState::Ready.page_name(), "messages");
+        assert_eq!(ListState::Error("boom".to_string()).page_name(), "error");
     }
 }
