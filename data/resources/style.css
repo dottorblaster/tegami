@@ -121,3 +121,10 @@
   min-height: 0;
   font-size: 0.85em;
 }
+
+.composer-cc-toggle {
+  padding: 0;
+  min-height: 0;
+  color: @accent_color;
+  font-size: 0.85em;
+}

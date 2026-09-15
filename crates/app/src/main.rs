@@ -3,6 +3,7 @@
 
 mod application;
 mod attachment;
+mod composer;
 mod config;
 mod conversation;
 mod html_view;

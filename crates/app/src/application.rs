@@ -50,6 +50,16 @@ fn register_actions() {
     let app = relm4::main_application();
     app.set_accelerators_for_action::<Quit>(&["<primary>q"]);
     register_open_message_action(&app);
+    register_compose_action(&app);
+}
+
+fn register_compose_action(app: &gtk::Application) {
+    let action = gio::SimpleAction::new("compose", None);
+    action.connect_activate(|_, _| {
+        WINDOW_BROKER.send(WindowMsg::Compose);
+    });
+    app.add_action(&action);
+    app.set_accels_for_action("app.compose", &["<primary>n"]);
 }
 
 fn register_open_message_action(app: &gtk::Application) {

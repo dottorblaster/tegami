@@ -15,6 +15,7 @@ use relm4::prelude::*;
 use tracing::debug;
 
 use crate::application::{About, Quit};
+use crate::composer::{self, Composer, ComposerOutput};
 use crate::config;
 use crate::conversation::{AnchorState, Conversation, ConversationMsg, ConversationOutput};
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
@@ -42,6 +43,7 @@ pub struct Window {
     move_menu: Option<gio::Menu>,
     move_actions: Option<gio::SimpleActionGroup>,
     move_menu_dirty: Cell<bool>,
+    composer: Option<Controller<Composer>>,
 }
 
 #[derive(Debug)]
@@ -93,6 +95,8 @@ pub enum WindowMsg {
     MoveMessage {
         target_folder_id: i64,
     },
+    Compose,
+    DraftReady(composer::MessageDraft),
 }
 
 #[relm4::component(pub)]
@@ -159,6 +163,12 @@ impl SimpleComponent for Window {
                                     set_icon_name: "sidebar-show-symbolic",
                                     set_tooltip_text: Some("Show folders"),
                                     set_active: true,
+                                },
+
+                                pack_end = &gtk::Button {
+                                    set_icon_name: "mail-message-new-symbolic",
+                                    set_tooltip_text: Some("New Message"),
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::Compose),
                                 },
                             },
 
@@ -300,6 +310,7 @@ impl SimpleComponent for Window {
             move_menu: None,
             move_actions: None,
             move_menu_dirty: Cell::new(false),
+            composer: None,
         };
 
         let folder_tree = model.folder_tree.widget();
@@ -309,6 +320,10 @@ impl SimpleComponent for Window {
         model.split_view = Some(widgets.inner_view.clone());
 
         let menu = gio::Menu::new();
+        menu.append_item(&gio::MenuItem::new(
+            Some("New Message"),
+            Some("app.compose"),
+        ));
         menu.append_item(&RelmAction::<About>::to_menu_item("About Tegami"));
         menu.append_item(&RelmAction::<Quit>::to_menu_item("Quit"));
         widgets.menu_button.set_menu_model(Some(&menu));
@@ -470,6 +485,28 @@ impl SimpleComponent for Window {
             WindowMsg::MoveMessage { target_folder_id } => {
                 self.move_message(target_folder_id, &sender);
             }
+            WindowMsg::Compose => {
+                if let Some(composer) = &self.composer
+                    && composer.widget().is_visible()
+                {
+                    composer.widget().present();
+                } else {
+                    self.open_composer(&sender);
+                }
+            }
+            WindowMsg::DraftReady(draft) => {
+                debug!(
+                    from = draft
+                        .identity
+                        .as_ref()
+                        .map(|identity| identity.email.as_str())
+                        .unwrap_or_default(),
+                    to = %draft.to,
+                    subject = %draft.subject,
+                    body_len = draft.body.len(),
+                    "composer draft ready"
+                );
+            }
             WindowMsg::SyncError { detail } => {
                 debug!(detail, "sync error");
             }
@@ -502,6 +539,17 @@ impl SimpleComponent for Window {
 }
 
 impl Window {
+    fn open_composer(&mut self, sender: &ComponentSender<Self>) {
+        let builder = Composer::builder();
+        relm4::main_application().add_window(&builder.root);
+        let composer = builder
+            .launch(self.store.clone())
+            .forward(sender.input_sender(), |msg| match msg {
+                ComposerOutput::Send(draft) => WindowMsg::DraftReady(draft),
+            });
+        self.composer = Some(composer);
+    }
+
     fn rebuild_move_menu(&mut self, sender: &ComponentSender<Self>) {
         let current = self.anchor.as_ref().map(|anchor| anchor.folder_id);
         let mut targets: Vec<FolderRecord> = self
