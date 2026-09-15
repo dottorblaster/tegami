@@ -21,6 +21,8 @@ use mail_core::{Credential, Folder, FolderDelta, FolderRole, FolderState, MailBa
 
 use crate::auth::Xoauth2;
 
+const IDLE_CYCLE: Duration = Duration::from_secs(60);
+
 trait BackendStream: AsyncRead + AsyncWrite + std::fmt::Debug {}
 impl<T: AsyncRead + AsyncWrite + std::fmt::Debug + ?Sized> BackendStream for T {}
 
@@ -388,20 +390,17 @@ impl MailBackend for ImapBackend {
             return Err(MailError::Protocol("IDLE not supported".to_string()));
         }
         self.select_mailbox(folder).await?;
-        loop {
-            let session = self.session.take().ok_or(MailError::Disconnected)?;
-            let mut idle = session.idle();
-            idle.init().await.map_err(map_err)?;
-            let (wait, stop_source) = idle.wait_with_timeout(Duration::from_secs(29 * 60));
-            let response = wait.await.map_err(map_err)?;
-            drop(stop_source);
-            self.session = Some(idle.done().await.map_err(map_err)?);
-            match response {
-                IdleResponse::NewData(_) => return Ok(()),
-                IdleResponse::Timeout => continue,
-                IdleResponse::ManualInterrupt => {
-                    return Err(MailError::Protocol("idle interrupted".to_string()));
-                }
+        let session = self.session.take().ok_or(MailError::Disconnected)?;
+        let mut idle = session.idle();
+        idle.init().await.map_err(map_err)?;
+        let (wait, stop_source) = idle.wait_with_timeout(IDLE_CYCLE);
+        let response = wait.await.map_err(map_err)?;
+        drop(stop_source);
+        self.session = Some(idle.done().await.map_err(map_err)?);
+        match response {
+            IdleResponse::NewData(_) | IdleResponse::Timeout => Ok(()),
+            IdleResponse::ManualInterrupt => {
+                Err(MailError::Protocol("idle interrupted".to_string()))
             }
         }
     }

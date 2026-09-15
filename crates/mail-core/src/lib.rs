@@ -14,7 +14,9 @@ pub mod folder;
 pub mod mime;
 pub mod store;
 pub mod sync;
+pub mod worker;
 
 pub use backend::{Credential, MailBackend, MailError};
 pub use envelope::{Address, Envelope, FlagChange, MessageFlags};
 pub use folder::{Folder, FolderDelta, FolderRole, FolderState};
+pub use worker::{AccountWorker, WorkerCommand, WorkerConfig, WorkerEvent};

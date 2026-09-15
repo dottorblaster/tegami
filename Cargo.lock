@@ -56,10 +56,13 @@ dependencies = [
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "accounts",
+ "imap",
  "mail-core",
  "relm4",
  "tracing",
  "tracing-subscriber",
+ "zbus",
 ]
 
 [[package]]

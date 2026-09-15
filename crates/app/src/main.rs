@@ -6,6 +6,7 @@ mod config;
 mod logging;
 mod message_list;
 mod sidebar;
+mod sync;
 mod window;
 
 use relm4::gtk::gio;

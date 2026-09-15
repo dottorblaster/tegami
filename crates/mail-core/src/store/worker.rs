@@ -132,6 +132,14 @@ pub struct Store {
     sender: mpsc::Sender<Command>,
 }
 
+impl Clone for Store {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
         let path = path.as_ref().to_path_buf();

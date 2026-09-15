@@ -14,7 +14,8 @@ use tracing::debug;
 use crate::application::{About, Quit};
 use crate::config;
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
-use crate::sidebar::{FolderKey, FolderTree, FolderTreeOutput};
+use crate::sidebar::{FolderKey, FolderTree, FolderTreeMsg, FolderTreeOutput};
+use crate::sync::{SyncService, SyncServiceMsg, SyncServiceOutput};
 
 const COLLAPSE_FOLDERS_WIDTH: f64 = 860.0;
 const COLLAPSE_READING_WIDTH: f64 = 500.0;
@@ -22,13 +23,18 @@ const COLLAPSE_READING_WIDTH: f64 = 500.0;
 pub struct Window {
     folder_tree: Controller<FolderTree>,
     message_list: Controller<MessageList>,
+    sync_service: Controller<SyncService>,
     mailbox_page_title: String,
+    selected_folder_id: Option<i64>,
 }
 
 #[derive(Debug)]
 pub enum WindowMsg {
     FolderSelected { key: FolderKey, title: String },
     MessageSelected { folder_id: i64, uid: u32 },
+    AccountsChanged,
+    FolderChanged { folder_id: i64 },
+    SyncError { detail: String },
 }
 
 #[relm4::component(pub)]
@@ -153,16 +159,28 @@ impl SimpleComponent for Window {
                 });
         let message_list =
             MessageList::builder()
-                .launch(store)
+                .launch(store.clone())
                 .forward(sender.input_sender(), |msg| match msg {
                     MessageListOutput::Selected { folder_id, uid } => {
                         WindowMsg::MessageSelected { folder_id, uid }
                     }
                 });
+        let sync_service =
+            SyncService::builder()
+                .launch(store)
+                .forward(sender.input_sender(), |msg| match msg {
+                    SyncServiceOutput::AccountsChanged => WindowMsg::AccountsChanged,
+                    SyncServiceOutput::FolderChanged { folder_id } => {
+                        WindowMsg::FolderChanged { folder_id }
+                    }
+                    SyncServiceOutput::Error { detail } => WindowMsg::SyncError { detail },
+                });
         let model = Window {
             folder_tree,
             message_list,
+            sync_service,
             mailbox_page_title: "Inbox".to_string(),
+            selected_folder_id: None,
         };
 
         let folder_tree = model.folder_tree.widget();
@@ -195,13 +213,30 @@ impl SimpleComponent for Window {
         match msg {
             WindowMsg::FolderSelected { key, title } => {
                 self.mailbox_page_title = title;
+                self.selected_folder_id = Some(key.folder_id);
                 self.message_list.emit(MessageListMsg::Load {
                     folder_id: key.folder_id,
+                });
+                self.sync_service.emit(SyncServiceMsg::WatchFolder {
+                    account_id: key.account_id,
+                    folder: key.name.clone(),
                 });
                 debug!(account = key.account_id, folder = %key.name, "folder selected");
             }
             WindowMsg::MessageSelected { folder_id, uid } => {
                 debug!(folder_id, uid, "message selected");
+            }
+            WindowMsg::AccountsChanged => {
+                self.folder_tree.emit(FolderTreeMsg::Reload);
+            }
+            WindowMsg::FolderChanged { folder_id } => {
+                self.folder_tree.emit(FolderTreeMsg::Reload);
+                if self.selected_folder_id == Some(folder_id) {
+                    self.message_list.emit(MessageListMsg::Load { folder_id });
+                }
+            }
+            WindowMsg::SyncError { detail } => {
+                debug!(detail, "sync error");
             }
         }
     }

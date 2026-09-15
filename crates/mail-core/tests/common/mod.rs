@@ -262,13 +262,23 @@ impl MailBackend for FakeBackend {
     async fn set_flags(&mut self, folder: &str, uids: &[u32], change: FlagChange) -> Result<()> {
         self.flag_calls
             .push((folder.to_string(), uids.to_vec(), change));
-        if let Some(envelopes) = self.folder_mut(folder) {
-            for uid in uids {
-                if let Some(target) = envelopes.iter_mut().find(|envelope| envelope.uid == *uid) {
-                    apply_change(&mut target.flags, change);
+        let base = self.modseq;
+        let touched = match self.folder_mut(folder) {
+            Some(envelopes) => {
+                let mut touched = 0;
+                for uid in uids {
+                    if let Some(target) = envelopes.iter_mut().find(|envelope| envelope.uid == *uid)
+                    {
+                        touched += 1;
+                        target.modseq = Some(base + touched);
+                        apply_change(&mut target.flags, change);
+                    }
                 }
+                touched
             }
-        }
+            None => 0,
+        };
+        self.modseq = base + touched;
         Ok(())
     }
 

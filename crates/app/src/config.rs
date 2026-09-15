@@ -10,3 +10,12 @@ pub fn store_path() -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).expect("failed to create data directory");
     dir.join("mail.sqlite3")
 }
+
+/// The directory caching raw MIME bodies and attachments.
+pub fn body_dir() -> std::path::PathBuf {
+    let dir = relm4::gtk::glib::user_data_dir()
+        .join("tegami")
+        .join("bodies");
+    std::fs::create_dir_all(&dir).expect("failed to create body cache directory");
+    dir
+}

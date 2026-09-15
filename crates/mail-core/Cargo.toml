@@ -14,7 +14,7 @@ workspace = true
 [dependencies]
 mail-parser = "0.11"
 rusqlite = { version = "0.40", features = ["bundled-full"] }
-tokio = { version = "1", features = ["fs", "rt", "sync"] }
+tokio = { version = "1", features = ["fs", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 rusqlite = { version = "0.40", features = ["bundled-full"] }
