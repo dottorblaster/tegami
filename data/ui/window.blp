@@ -1,23 +1,91 @@
 using Gtk 4.0;
 using Adw 1;
 
-Adw.ApplicationWindow hello {
+Adw.ApplicationWindow {
   title: "Tegami";
   default-width: 1080;
   default-height: 720;
+  width-request: 360;
+  height-request: 294;
 
-  content: Adw.ToolbarView {
-    [top]
-    Adw.HeaderBar {
-      [end]
-      Gtk.MenuButton {
-        icon-name: "open-menu-symbolic";
-      }
+  Adw.Breakpoint {
+    condition ("max-width: 860sp")
+
+    setters {
+      outer_view.collapsed: true;
     }
+  }
 
-    content: Gtk.Box {
-      hexpand: true;
-      vexpand: true;
+  Adw.Breakpoint {
+    condition ("max-width: 500sp")
+
+    setters {
+      inner_view.collapsed: true;
+    }
+  }
+
+  content: Adw.OverlaySplitView outer_view {
+    max-sidebar-width: 260;
+    sidebar-width-fraction: 0.179;
+
+    sidebar: Adw.ToolbarView {
+      [top]
+      Adw.HeaderBar {
+        [end]
+        Gtk.MenuButton {
+          icon-name: "open-menu-symbolic";
+        }
+      }
+
+      content: Gtk.Box {
+        orientation: vertical;
+        hexpand: true;
+        vexpand: true;
+      };
+    };
+
+    content: Adw.NavigationSplitView inner_view {
+      min-sidebar-width: 290;
+      max-sidebar-width: 520;
+      sidebar-width-fraction: 0.355;
+
+      sidebar: Adw.NavigationPage {
+        title: "Inbox";
+        tag: "mailbox";
+
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {
+            [start]
+            Gtk.ToggleButton {
+              icon-name: "sidebar-show-symbolic";
+              tooltip-text: "Show folders";
+            }
+          }
+
+          content: Gtk.Box {
+            orientation: vertical;
+            hexpand: true;
+            vexpand: true;
+          };
+        };
+      };
+
+      content: Adw.NavigationPage {
+        title: "Message";
+        tag: "message";
+
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {}
+
+          content: Gtk.Box {
+            orientation: vertical;
+            hexpand: true;
+            vexpand: true;
+          };
+        };
+      };
     };
   };
 }
