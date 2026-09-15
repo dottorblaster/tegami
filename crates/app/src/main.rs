@@ -9,6 +9,7 @@ mod html_view;
 mod logging;
 mod message_list;
 mod message_text;
+mod notify;
 mod sidebar;
 mod sync;
 mod window;

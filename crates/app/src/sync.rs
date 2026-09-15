@@ -7,13 +7,15 @@ use accounts::CredentialWorker;
 use imap::ImapBackend;
 use mail_core::account::AccountConfig;
 use mail_core::envelope::FlagChange;
-use mail_core::store::Store;
+use mail_core::store::{SpecialUse, Store, bits_to_flags};
 use mail_core::sync::EnvelopeWindow;
 use mail_core::worker::{AccountWorker, WorkerCommand, WorkerConfig, WorkerEvent};
 use relm4::prelude::*;
 use tracing::{debug, warn};
 
 use crate::config;
+use crate::message_text::{display_sender, display_subject};
+use crate::notify::MailNotice;
 
 #[derive(Debug, Clone)]
 pub struct ServiceAccount {
@@ -92,9 +94,19 @@ pub enum SyncServiceMsg {
 #[derive(Debug)]
 pub enum SyncServiceOutput {
     AccountsChanged,
-    FolderChanged { folder_id: i64 },
-    BodyFetched { message_id: i64 },
-    Error { detail: String },
+    FolderChanged {
+        folder_id: i64,
+    },
+    BodyFetched {
+        message_id: i64,
+    },
+    NewMail {
+        folder_title: String,
+        notices: Vec<MailNotice>,
+    },
+    Error {
+        detail: String,
+    },
 }
 
 pub struct SyncService {
@@ -102,6 +114,7 @@ pub struct SyncService {
     body_dir: PathBuf,
     workers: HashMap<i64, AccountWorker>,
     watching: bool,
+    synced_folders: HashSet<i64>,
 }
 
 impl SyncService {
@@ -160,6 +173,12 @@ impl SyncService {
                 let _ = sender.output(SyncServiceOutput::FolderChanged {
                     folder_id: report.folder_id,
                 });
+                // The first sync of a folder only populates it; new mail is
+                // worth notifying about afterwards.
+                let populated = !self.synced_folders.insert(report.folder_id);
+                if populated && !report.new_uids.is_empty() {
+                    self.check_new_mail(report.folder_id, report.new_uids, sender);
+                }
             }
             WorkerEvent::AccountSynced { .. } => {
                 let _ = sender.output(SyncServiceOutput::AccountsChanged);
@@ -187,6 +206,20 @@ impl SyncService {
         if let Some(worker) = self.workers.get(&account_id) {
             worker.send(WorkerCommand::Watch { folder });
         }
+    }
+
+    fn check_new_mail(&self, folder_id: i64, uids: Vec<u32>, sender: &ComponentSender<Self>) {
+        let store = self.store.clone();
+        let notice_sender = sender.clone();
+        sender.oneshot_command(async move {
+            if let Some((folder_title, notices)) = new_mail_notices(&store, folder_id, &uids).await
+            {
+                let _ = notice_sender.output(SyncServiceOutput::NewMail {
+                    folder_title,
+                    notices,
+                });
+            }
+        });
     }
 
     fn dispatch(&self, action: ResolvedAction) {
@@ -241,6 +274,7 @@ impl SimpleComponent for SyncService {
             body_dir: config::body_dir(),
             workers: HashMap::new(),
             watching: false,
+            synced_folders: HashSet::new(),
         };
         sender.input(SyncServiceMsg::Start);
         ComponentParts { model, widgets: () }
@@ -318,6 +352,37 @@ impl SimpleComponent for SyncService {
             }
         }
     }
+}
+
+async fn new_mail_notices(
+    store: &Store,
+    folder_id: i64,
+    uids: &[u32],
+) -> Option<(String, Vec<MailNotice>)> {
+    let folder = store.folder(folder_id).await.ok()??;
+    if folder.special_use != Some(SpecialUse::Inbox) {
+        return None;
+    }
+    let folder_title = folder
+        .display_name
+        .filter(|name| !name.is_empty())
+        .unwrap_or(folder.name);
+    let mut notices = Vec::new();
+    for uid in uids {
+        let Ok(Some(record)) = store.message(folder_id, *uid).await else {
+            continue;
+        };
+        if bits_to_flags(record.flags).seen {
+            continue;
+        }
+        notices.push(MailNotice {
+            folder_id,
+            uid: *uid,
+            sender: display_sender(&record),
+            subject: display_subject(&record.subject),
+        });
+    }
+    (!notices.is_empty()).then_some((folder_title, notices))
 }
 
 async fn resolve_folder(store: &Store, folder_id: i64) -> Result<(i64, String), String> {
@@ -451,7 +516,9 @@ fn start_watcher(store: Arc<Store>, sender: &ComponentSender<SyncService>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mail_core::store::{AccountRecord, AccountSource, AuthKind, FolderRecord};
+    use mail_core::store::{
+        AccountRecord, AccountSource, AuthKind, BodyState, FLAG_SEEN, FolderRecord, MessageRecord,
+    };
 
     fn account() -> AccountRecord {
         AccountRecord {
@@ -574,5 +641,62 @@ mod tests {
             uids: vec![1],
         };
         assert!(resolve_action(&store, action).await.is_err());
+    }
+
+    fn message(folder_id: i64, uid: u32) -> MessageRecord {
+        MessageRecord {
+            id: None,
+            folder_id,
+            uid,
+            modseq: None,
+            message_id: Some(format!("<{uid}@example.org>")),
+            thread_id: None,
+            subject: format!("Subject {uid}"),
+            from_addr: Some("sender@example.org".to_string()),
+            from_name: Some(format!("Sender {uid}")),
+            to_addrs: None,
+            cc_addrs: None,
+            date_sent: Some(1_700_000_000),
+            date_recv: Some(1_700_000_001),
+            in_reply_to: None,
+            refs: None,
+            flags: 0,
+            has_attach: false,
+            size: None,
+            structure: None,
+            raw_path: None,
+            body_state: BodyState::None,
+        }
+    }
+
+    #[tokio::test]
+    async fn notices_cover_only_unread_inbox_mail() {
+        let store = Store::open(":memory:").unwrap();
+        let account_id = store.upsert_account(account()).await.unwrap();
+        let mut inbox = folder(account_id, "INBOX");
+        inbox.display_name = Some("Inbox".to_string());
+        inbox.special_use = Some(SpecialUse::Inbox);
+        let inbox = store.upsert_folder(inbox).await.unwrap();
+        let archive = store
+            .upsert_folder(folder(account_id, "Archive"))
+            .await
+            .unwrap();
+
+        let mut unread = message(inbox, 4);
+        unread.subject = "Hello there".to_string();
+        let mut seen = message(inbox, 5);
+        seen.flags = FLAG_SEEN;
+        store.upsert_messages(vec![unread, seen]).await.unwrap();
+
+        let (title, notices) = new_mail_notices(&store, inbox, &[4, 5]).await.unwrap();
+        assert_eq!(title, "Inbox");
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].uid, 4);
+        assert_eq!(notices[0].sender, "Sender 4");
+        assert_eq!(notices[0].subject, "Hello there");
+
+        assert!(new_mail_notices(&store, archive, &[4]).await.is_none());
+        assert!(new_mail_notices(&store, 404, &[4]).await.is_none());
+        assert!(new_mail_notices(&store, inbox, &[]).await.is_none());
     }
 }

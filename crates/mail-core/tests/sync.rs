@@ -99,9 +99,16 @@ async fn initial_sync_persists_window() {
         .iter()
         .find(|folder| folder.name == "INBOX")
         .unwrap();
+    let inbox_id = inbox.id.unwrap();
+    let inbox_report = reports
+        .iter()
+        .find(|report| report.folder_id == inbox_id)
+        .expect("inbox report");
+    // The window limits the initial fetch to the two newest messages.
+    assert_eq!(inbox_report.new_uids, vec![4, 5]);
+
     assert_eq!(inbox.special_use, Some(mail_core::store::SpecialUse::Inbox));
     assert!(inbox.highestmodseq.is_some());
-    let inbox_id = inbox.id.unwrap();
 
     let messages = store.messages(inbox_id).await.unwrap();
     assert_eq!(messages.len(), 2);
@@ -147,6 +154,7 @@ async fn incremental_sync_applies_delta_and_vanished() {
     assert!(report.incremental);
     assert_eq!(report.changed, 2);
     assert_eq!(report.vanished, 1);
+    assert_eq!(report.new_uids, vec![new_uid]);
 
     assert_eq!(
         store.message_uids(inbox_id).await.unwrap(),

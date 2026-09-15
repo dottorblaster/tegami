@@ -209,6 +209,9 @@ pub enum MessageListMsg {
         folder_id: i64,
         result: Result<Vec<MessageRow>, String>,
     },
+    Select {
+        uid: u32,
+    },
     Retry,
     SelectionChanged,
 }
@@ -223,6 +226,7 @@ pub struct MessageList {
     list: TypedListView<MessageRow, gtk::SingleSelection>,
     folder_id: Option<i64>,
     selected_uid: Option<u32>,
+    pending_select: Option<u32>,
     restoring: bool,
     state: ListState,
 }
@@ -307,6 +311,7 @@ impl SimpleComponent for MessageList {
             list,
             folder_id: None,
             selected_uid: None,
+            pending_select: None,
             restoring: false,
             state: ListState::Idle,
         };
@@ -359,6 +364,19 @@ impl SimpleComponent for MessageList {
                 if reemit {
                     sender.input(MessageListMsg::SelectionChanged);
                 }
+                if let Some(uid) = self.pending_select.take()
+                    && self.state == ListState::Ready
+                {
+                    self.select_uid(uid);
+                }
+            }
+            MessageListMsg::Select { uid } => {
+                self.selected_uid = None;
+                if self.state == ListState::Ready {
+                    self.select_uid(uid);
+                } else {
+                    self.pending_select = Some(uid);
+                }
             }
             MessageListMsg::Retry => {
                 if let Some(folder_id) = self.folder_id {
@@ -393,15 +411,29 @@ impl MessageList {
         let Some(uid) = self.selected_uid else {
             return;
         };
+        if let Some(position) = self.visible_position(uid) {
+            self.list.selection_model.set_selected(position);
+        } else {
+            self.selected_uid = None;
+        }
+    }
+
+    fn select_uid(&mut self, uid: u32) {
+        if let Some(position) = self.visible_position(uid) {
+            self.selected_uid = None;
+            self.list.selection_model.set_selected(position);
+        }
+    }
+
+    fn visible_position(&self, uid: u32) -> Option<u32> {
         let mut position = 0;
         while let Some(item) = self.list.get_visible(position) {
             if item.borrow().uid == uid {
-                self.list.selection_model.set_selected(position);
-                return;
+                return Some(position);
             }
             position += 1;
         }
-        self.selected_uid = None;
+        None
     }
 
     fn empty_title(&self) -> &'static str {

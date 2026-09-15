@@ -105,6 +105,7 @@ pub struct FolderSync {
     pub incremental: bool,
     pub changed: usize,
     pub vanished: usize,
+    pub new_uids: Vec<u32>,
 }
 
 pub async fn sync_folder<B: MailBackend + ?Sized>(
@@ -136,6 +137,8 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
             .map(|modseq| modseq as u64)
     };
 
+    let known: HashSet<u32> = store.message_uids(folder_id).await?.into_iter().collect();
+
     let (changed, vanished, incremental) = match previous_modseq {
         Some(modseq) => {
             let delta = backend.fetch_delta(&folder.name, modseq).await?;
@@ -148,10 +151,8 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
         }
         None => {
             let uids = backend.uids(&folder.name).await?;
-            let stored = store.message_uids(folder_id).await?;
-            let known: HashSet<u32> = stored.iter().copied().collect();
             let current: HashSet<u32> = uids.iter().copied().collect();
-            let vanished: Vec<u32> = stored
+            let vanished: Vec<u32> = known
                 .iter()
                 .copied()
                 .filter(|uid| !current.contains(uid))
@@ -167,6 +168,11 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
         }
     };
 
+    let new_uids: Vec<u32> = changed
+        .iter()
+        .map(|envelope| envelope.uid)
+        .filter(|uid| !known.contains(uid))
+        .collect();
     let records: Vec<MessageRecord> = changed
         .iter()
         .map(|envelope| message_record(folder_id, envelope))
@@ -180,6 +186,7 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
         incremental,
         changed: changed_count,
         vanished: vanished.len(),
+        new_uids,
     })
 }
 

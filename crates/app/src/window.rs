@@ -7,6 +7,7 @@ use std::sync::Arc;
 use gtk::gio;
 use mail_core::envelope::FlagChange;
 use mail_core::store::{FLAG_FLAGGED, FLAG_SEEN, FolderRecord, SpecialUse, Store};
+use relm4::MessageBroker;
 use relm4::actions::RelmAction;
 use relm4::adw::prelude::*;
 use relm4::gtk::glib;
@@ -17,14 +18,18 @@ use crate::application::{About, Quit};
 use crate::config;
 use crate::conversation::{AnchorState, Conversation, ConversationMsg, ConversationOutput};
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
+use crate::notify::{self, MailNotice};
 use crate::sidebar::{FolderKey, FolderTree, FolderTreeMsg, FolderTreeOutput};
 use crate::sync::{MessageAction, SyncService, SyncServiceMsg, SyncServiceOutput};
 
 const COLLAPSE_FOLDERS_WIDTH: f64 = 860.0;
 const COLLAPSE_READING_WIDTH: f64 = 500.0;
 
+pub static WINDOW_BROKER: MessageBroker<WindowMsg> = MessageBroker::new();
+
 pub struct Window {
     store: Arc<Store>,
+    window: adw::ApplicationWindow,
     folder_tree: Controller<FolderTree>,
     message_list: Controller<MessageList>,
     conversation: Controller<Conversation>,
@@ -74,6 +79,14 @@ pub enum WindowMsg {
     },
     MessagesChanged {
         folder_id: i64,
+    },
+    NewMail {
+        folder_title: String,
+        notices: Vec<MailNotice>,
+    },
+    OpenMessage {
+        folder_id: i64,
+        uid: u32,
     },
     ToggleFlagged,
     DeleteMessage,
@@ -220,7 +233,7 @@ impl SimpleComponent for Window {
 
     fn init(
         _init: Self::Init,
-        _root: Self::Root,
+        root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let store = Arc::new(Store::open(config::store_path()).expect("failed to open mail store"));
@@ -263,10 +276,18 @@ impl SimpleComponent for Window {
                     SyncServiceOutput::BodyFetched { message_id } => {
                         WindowMsg::BodyFetched { message_id }
                     }
+                    SyncServiceOutput::NewMail {
+                        folder_title,
+                        notices,
+                    } => WindowMsg::NewMail {
+                        folder_title,
+                        notices,
+                    },
                     SyncServiceOutput::Error { detail } => WindowMsg::SyncError { detail },
                 });
         let mut model = Window {
             store,
+            window: root.clone(),
             folder_tree,
             message_list,
             conversation,
@@ -429,6 +450,22 @@ impl SimpleComponent for Window {
             }
             WindowMsg::DeleteMessage => {
                 self.delete_message(&sender);
+            }
+            WindowMsg::NewMail {
+                folder_title,
+                notices,
+            } => {
+                notify::send(&notify::notifications(&folder_title, &notices));
+            }
+            WindowMsg::OpenMessage { folder_id, uid } => {
+                self.window.present();
+                self.selected_folder_id = Some(folder_id);
+                self.message_list.emit(MessageListMsg::Load { folder_id });
+                self.message_list.emit(MessageListMsg::Select { uid });
+                if let Some(split_view) = &self.split_view {
+                    split_view.set_show_content(true);
+                }
+                debug!(folder_id, uid, "opening message from notification");
             }
             WindowMsg::MoveMessage { target_folder_id } => {
                 self.move_message(target_folder_id, &sender);

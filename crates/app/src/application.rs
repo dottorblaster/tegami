@@ -3,18 +3,20 @@
 
 use relm4::actions::{AccelsPlus, RelmAction, RelmActionGroup};
 use relm4::adw::prelude::*;
+use relm4::gtk::gio;
+use relm4::gtk::glib;
 use relm4::prelude::*;
 use tracing::debug;
 
 use crate::config;
-use crate::window::Window;
+use crate::window::{WINDOW_BROKER, Window, WindowMsg};
 
 relm4::new_action_group!(pub AppGroup, "app");
 relm4::new_stateless_action!(pub Quit, AppGroup, "quit");
 relm4::new_stateless_action!(pub About, AppGroup, "about");
 
 pub fn run() {
-    let app = RelmApp::new(config::APP_ID);
+    let app = RelmApp::new(config::APP_ID).with_broker(&WINDOW_BROKER);
     register_actions();
     load_style();
     debug!("application started");
@@ -47,6 +49,24 @@ fn register_actions() {
 
     let app = relm4::main_application();
     app.set_accelerators_for_action::<Quit>(&["<primary>q"]);
+    register_open_message_action(&app);
+}
+
+fn register_open_message_action(app: &gtk::Application) {
+    let action = gio::SimpleAction::new("open-message", Some(glib::VariantTy::STRING));
+    action.connect_activate(|_, target| {
+        let Some(target) = target.and_then(|target| target.str()) else {
+            return;
+        };
+        let Some((folder_id, uid)) = target.split_once(':') else {
+            return;
+        };
+        let (Ok(folder_id), Ok(uid)) = (folder_id.parse(), uid.parse()) else {
+            return;
+        };
+        WINDOW_BROKER.send(WindowMsg::OpenMessage { folder_id, uid });
+    });
+    app.add_action(&action);
 }
 
 fn show_about_dialog() {
