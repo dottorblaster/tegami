@@ -19,3 +19,12 @@ pub fn body_dir() -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).expect("failed to create body cache directory");
     dir
 }
+
+/// The directory holding attachments extracted for opening.
+pub fn attachment_dir() -> std::path::PathBuf {
+    let dir = relm4::gtk::glib::user_cache_dir()
+        .join("tegami")
+        .join("attachments");
+    std::fs::create_dir_all(&dir).expect("failed to create attachment cache directory");
+    dir
+}

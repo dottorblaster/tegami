@@ -42,6 +42,17 @@ fn genuine_html(message: &Message<'_>) -> Option<String> {
         })
 }
 
+/// Resolves an attachment again from the raw message, matching the `part_id`
+/// assigned by [`parse`].
+pub fn find_attachment(raw: &[u8], part_id: &str) -> Option<Attachment> {
+    let index: usize = part_id.parse().ok()?;
+    let message = MessageParser::default().parse(raw)?;
+    message
+        .attachments()
+        .nth(index)
+        .map(|part| attachment(index, part))
+}
+
 fn attachment(index: usize, part: &MessagePart<'_>) -> Attachment {
     Attachment {
         part_id: index.to_string(),
@@ -65,7 +76,7 @@ fn content_type(content_type: &ContentType<'_>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse;
+    use super::{find_attachment, parse};
 
     const MULTIPART: &str = concat!(
         "From: Sender <sender@example.org>\r\n",
@@ -166,6 +177,16 @@ mod tests {
                 .as_deref()
                 .is_some_and(|html| html.contains("cid:logo@example.org"))
         );
+    }
+
+    #[test]
+    fn finds_attachments_by_part_id() {
+        let found = find_attachment(MULTIPART.as_bytes(), "0").unwrap();
+        assert_eq!(found.filename.as_deref(), Some("doc.pdf"));
+        assert_eq!(found.data, b"Hello");
+
+        assert!(find_attachment(MULTIPART.as_bytes(), "3").is_none());
+        assert!(find_attachment(MULTIPART.as_bytes(), "nope").is_none());
     }
 
     #[test]

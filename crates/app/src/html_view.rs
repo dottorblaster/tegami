@@ -42,7 +42,7 @@ pub(crate) struct InlinePart {
 pub(crate) fn inline_parts(attachments: Vec<Attachment>) -> Vec<InlinePart> {
     attachments
         .into_iter()
-        .filter(|attachment| attachment.mime_type.starts_with("image/"))
+        .filter(crate::attachment::is_inline_image)
         .filter_map(|attachment| {
             let content_id = attachment.content_id?;
             Some(InlinePart {
@@ -194,7 +194,6 @@ mod tests {
         assert_eq!(parts[0].mime_type, "image/png");
         assert_eq!(parts[0].data, b"png");
     }
-
     #[test]
     fn detects_remote_resources() {
         assert!(has_remote_content(

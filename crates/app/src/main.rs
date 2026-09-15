@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 mod application;
+mod attachment;
 mod config;
 mod conversation;
 mod html_view;

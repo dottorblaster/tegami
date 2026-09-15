@@ -9,11 +9,13 @@
 //! WebKitGTK view when available, falling back to plain text.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use mail_core::store::{BodyState, MessageRecord, Store, bits_to_flags};
 use relm4::adw;
 use relm4::factory::{DynamicIndex, FactoryComponent, FactorySender, FactoryVecDeque};
+use relm4::gtk::gio;
 use relm4::gtk::glib;
 use relm4::gtk::prelude::*;
 use relm4::prelude::*;
@@ -21,6 +23,7 @@ use tracing::debug;
 use webkit6::WebView;
 use webkit6::prelude::WebViewExt;
 
+use crate::attachment::{self, AttachmentInfo};
 use crate::html_view::{self, InlinePart};
 use crate::message_text::{display_sender, display_subject, format_timestamp};
 
@@ -46,6 +49,7 @@ pub struct BodyFields {
     html: Option<String>,
     has_remote: bool,
     inline: Vec<InlinePart>,
+    attachments: Vec<AttachmentInfo>,
 }
 
 impl BodyFields {
@@ -58,6 +62,7 @@ impl BodyFields {
             html: None,
             has_remote: false,
             inline: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -70,6 +75,7 @@ impl BodyFields {
             html: None,
             has_remote: false,
             inline: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 }
@@ -89,6 +95,7 @@ pub struct MessageCard {
     quote_visible: bool,
     view: BodyView,
     remote_allowed: bool,
+    raw_path: Option<String>,
     body: BodyFields,
 }
 
@@ -100,6 +107,7 @@ pub enum MessageCardMsg {
     Refresh,
     LoadRemoteOnce,
     AllowSender,
+    LaunchAttachment { path: PathBuf },
     SetBody { body: BodyFields, has_attach: bool },
 }
 
@@ -332,6 +340,15 @@ impl FactoryComponent for MessageCard {
                         },
                     },
                 },
+
+                #[name(attachment_slot)]
+                gtk::Box {
+                    set_orientation: gtk::Orientation::Vertical,
+                    set_spacing: 4,
+                    add_css_class: "conversation-attachments",
+                    #[watch]
+                    set_visible: !self.body.attachments.is_empty(),
+                },
             },
         }
     }
@@ -355,6 +372,15 @@ impl FactoryComponent for MessageCard {
                     });
                 }
             }
+            MessageCardMsg::LaunchAttachment { path } => {
+                let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(&path)));
+                launcher.set_always_ask(true);
+                launcher.launch(None::<&gtk::Window>, gio::Cancellable::NONE, |result| {
+                    if let Err(err) = result {
+                        debug!(detail = %err, "failed to open attachment");
+                    }
+                });
+            }
             MessageCardMsg::SetBody { body, has_attach } => {
                 self.view = if body.html.is_some() {
                     BodyView::Html
@@ -367,31 +393,9 @@ impl FactoryComponent for MessageCard {
         }
     }
 
-    fn post_view(&self, _sender: FactorySender<Self>) {
-        if !self.expanded || self.view != BodyView::Html || self.body.status != BodyStatus::Ready {
-            return;
-        }
-        let Some(html) = self.body.html.as_deref() else {
-            return;
-        };
-        let current = html_slot.first_child();
-        let up_to_date = current
-            .as_ref()
-            .and_then(|child| child.downcast_ref::<WebView>())
-            .is_some_and(|webview| {
-                webview.default_content_security_policy().is_none() == self.remote_allowed
-            });
-        if up_to_date {
-            return;
-        }
-        if let Some(child) = current {
-            html_slot.remove(&child);
-        }
-        html_slot.append(&html_view::new_webview(
-            html,
-            &self.body.inline,
-            self.remote_allowed,
-        ));
+    fn post_view(&self, sender: FactorySender<Self>) {
+        self.sync_webview(html_slot, &sender);
+        self.sync_attachments(attachment_slot, &sender);
     }
 }
 
@@ -427,6 +431,151 @@ impl MessageCard {
 
     fn show_remote_banner(&self) -> bool {
         remote_banner_visible(self)
+    }
+
+    fn sync_webview(&self, slot: &gtk::Box, _sender: &FactorySender<Self>) {
+        if !self.expanded || self.view != BodyView::Html || self.body.status != BodyStatus::Ready {
+            return;
+        }
+        let Some(html) = self.body.html.as_deref() else {
+            return;
+        };
+        let current = slot.first_child();
+        let up_to_date = current
+            .as_ref()
+            .and_then(|child| child.downcast_ref::<WebView>())
+            .is_some_and(|webview| {
+                webview.default_content_security_policy().is_none() == self.remote_allowed
+            });
+        if up_to_date {
+            return;
+        }
+        if let Some(child) = current {
+            slot.remove(&child);
+        }
+        slot.append(&html_view::new_webview(
+            html,
+            &self.body.inline,
+            self.remote_allowed,
+        ));
+    }
+
+    fn sync_attachments(&self, slot: &gtk::Box, sender: &FactorySender<Self>) {
+        if !self.expanded || slot.first_child().is_some() {
+            return;
+        }
+        for info in &self.body.attachments {
+            slot.append(&self.attachment_row(info, sender));
+        }
+    }
+
+    fn attachment_row(&self, info: &AttachmentInfo, sender: &FactorySender<Self>) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.add_css_class("conversation-attachment");
+
+        let icon = gtk::Image::from_gicon(&gio::content_type_get_icon(&info.mime_type));
+        icon.set_pixel_size(24);
+        icon.set_valign(gtk::Align::Center);
+        row.append(&icon);
+
+        let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        text.set_hexpand(true);
+        text.set_valign(gtk::Align::Center);
+
+        let name = gtk::Label::new(Some(&info.name));
+        name.set_xalign(0.0);
+        name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        name.add_css_class("conversation-attachment-name");
+        text.append(&name);
+
+        let detail = gtk::Label::new(Some(&format!(
+            "{} · {}",
+            gio::content_type_get_description(&info.mime_type),
+            attachment::size_text(info.size)
+        )));
+        detail.set_xalign(0.0);
+        detail.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        detail.add_css_class("dim-label");
+        detail.add_css_class("conversation-attachment-detail");
+        text.append(&detail);
+
+        row.append(&text);
+
+        let open = gtk::Button::with_label("Open");
+        open.set_valign(gtk::Align::Center);
+        open.add_css_class("flat");
+        open.add_css_class("conversation-attachment-action");
+        open.connect_clicked(self.open_handler(info, sender));
+        row.append(&open);
+
+        let save = gtk::Button::with_label("Save As…");
+        save.set_valign(gtk::Align::Center);
+        save.add_css_class("flat");
+        save.add_css_class("conversation-attachment-action");
+        save.connect_clicked(self.save_handler(info, sender));
+        row.append(&save);
+
+        row
+    }
+
+    fn open_handler(
+        &self,
+        info: &AttachmentInfo,
+        sender: &FactorySender<Self>,
+    ) -> impl Fn(&gtk::Button) + 'static {
+        let sender = sender.clone();
+        let message_id = self.message_id;
+        let raw_path = self.raw_path.clone();
+        let part_id = info.part_id.clone();
+        let name = info.name.clone();
+        move |_| {
+            let command_sender = sender.clone();
+            let raw_path = raw_path.clone();
+            let part_id = part_id.clone();
+            let name = name.clone();
+            sender.oneshot_command(async move {
+                match attachment::extract(message_id, raw_path.as_deref(), &part_id, &name).await {
+                    Ok(path) => command_sender.input(MessageCardMsg::LaunchAttachment { path }),
+                    Err(detail) => debug!(detail, "failed to extract attachment"),
+                }
+            });
+        }
+    }
+
+    fn save_handler(
+        &self,
+        info: &AttachmentInfo,
+        sender: &FactorySender<Self>,
+    ) -> impl Fn(&gtk::Button) + 'static {
+        let sender = sender.clone();
+        let raw_path = self.raw_path.clone();
+        let part_id = info.part_id.clone();
+        let name = attachment::safe_filename(&info.name);
+        move |button| {
+            let dialog = gtk::FileDialog::builder()
+                .title("Save attachment")
+                .initial_name(name.clone())
+                .build();
+            let window = button.root().and_downcast::<gtk::Window>();
+            let sender = sender.clone();
+            let raw_path = raw_path.clone();
+            let part_id = part_id.clone();
+            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                let Ok(file) = result else {
+                    return;
+                };
+                let Some(path) = file.path() else {
+                    return;
+                };
+                sender.oneshot_command(async move {
+                    if let Err(detail) =
+                        attachment::write(raw_path.as_deref(), &part_id, &path).await
+                    {
+                        debug!(detail, "failed to save attachment");
+                    }
+                });
+            });
+        }
     }
 }
 
@@ -764,6 +913,7 @@ async fn message_card(
             BodyView::Plain
         },
         remote_allowed,
+        raw_path: record.raw_path.clone(),
         body,
     }
 }
@@ -782,6 +932,7 @@ async fn body_fields(record: &MessageRecord) -> BodyFields {
         Some(parsed) => {
             let html = parsed.html.filter(|html| !html.trim().is_empty());
             let has_remote = html.as_deref().is_some_and(html_view::has_remote_content);
+            let attachments = attachment::list(&parsed.attachments);
             let inline = if html.is_some() {
                 html_view::inline_parts(parsed.attachments)
             } else {
@@ -799,6 +950,7 @@ async fn body_fields(record: &MessageRecord) -> BodyFields {
                         html,
                         has_remote,
                         inline,
+                        attachments,
                     }
                 }
                 _ if html.is_some() => BodyFields {
@@ -809,6 +961,7 @@ async fn body_fields(record: &MessageRecord) -> BodyFields {
                     html,
                     has_remote,
                     inline,
+                    attachments,
                 },
                 _ => BodyFields::unavailable(),
             }
@@ -886,6 +1039,7 @@ mod tests {
             html: html.map(str::to_string),
             has_remote: false,
             inline: Vec::new(),
+            attachments: Vec::new(),
         }
     }
 
@@ -904,6 +1058,7 @@ mod tests {
             quote_visible: false,
             view: BodyView::Html,
             remote_allowed: false,
+            raw_path: None,
             body,
         }
     }
