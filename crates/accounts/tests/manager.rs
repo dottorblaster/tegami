@@ -5,11 +5,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod session_bus;
+
 use accounts::goa::MailAccount;
 use accounts::manager::merge;
 use accounts::model::AccountChange;
 use mail_core::account::{AccountConfig, ImapConfig, SmtpConfig};
-use zbus::connection::{Builder, Connection};
+use session_bus::TestBus;
+use zbus::connection::Connection;
 use zbus::interface;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
@@ -301,22 +304,9 @@ impl MockEdsSource {
 async fn session(
     goa: &[GoaEntry],
     eds: &[EdsEntry],
-) -> Option<(Connection, Arc<Mutex<MockState>>)> {
-    let builder = match Builder::session() {
-        Ok(builder) => builder,
-        Err(_) => {
-            eprintln!("no session bus available; run via `dbus-run-session -- cargo test`");
-            return None;
-        }
-    };
-    let conn = builder
-        .name(GOA_SERVICE)
-        .ok()?
-        .name(EDS_SERVICE)
-        .ok()?
-        .build()
-        .await
-        .ok()?;
+) -> Option<(TestBus, Connection, Arc<Mutex<MockState>>)> {
+    let bus = TestBus::start()?;
+    let conn = bus.connection(&[GOA_SERVICE, EDS_SERVICE]).await?;
 
     let state = Arc::new(Mutex::new(MockState {
         goa: goa
@@ -353,7 +343,7 @@ async fn session(
     for entry in eds {
         serve_eds_source(&conn, &state, &entry.uid).await?;
     }
-    Some((conn, state))
+    Some((bus, conn, state))
 }
 
 async fn serve_goa_account(
@@ -516,7 +506,7 @@ async fn merged_accounts_from_services() {
         "SHARED@example.org",
         "imap.example.org",
     )];
-    let Some((conn, _state)) = session(&goa, &eds).await else {
+    let Some((_bus, conn, _state)) = session(&goa, &eds).await else {
         return;
     };
 
@@ -536,7 +526,7 @@ async fn merged_accounts_from_services() {
 async fn account_change_signals() {
     let _guard = BUS_LOCK.lock().await;
     let goa = vec![goa_entry("1", "change@example.org", "imap_smtp", false)];
-    let Some((conn, state)) = session(&goa, &[]).await else {
+    let Some((_bus, conn, state)) = session(&goa, &[]).await else {
         return;
     };
 

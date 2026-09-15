@@ -5,10 +5,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+mod session_bus;
+
 use accounts::goa::{
     AccountProxy, MailProxy, OAuth2BasedProxy, OAuth2TokenCache, ObjectManagerProxy,
 };
-use zbus::connection::{Builder, Connection};
+use session_bus::TestBus;
+use zbus::connection::Connection;
 use zbus::interface;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
@@ -241,15 +244,17 @@ impl MockObjectManager {
     }
 }
 
-async fn session_connection() -> Option<Connection> {
-    let builder = match Builder::session() {
-        Ok(builder) => builder,
-        Err(_) => {
-            eprintln!("no session bus available; run via `dbus-run-session -- cargo test`");
-            return None;
-        }
-    };
-    builder.name(SERVICE).ok()?.build().await.ok()
+async fn setup() -> Option<(TestBus, Connection)> {
+    let bus = TestBus::start()?;
+    let conn = bus.connection(&[SERVICE]).await?;
+    serve(&conn).await?;
+    Some((bus, conn))
+}
+
+async fn busy_setup() -> Option<(TestBus, Connection, tokio::sync::MutexGuard<'static, ()>)> {
+    let _guard = BUS_LOCK.lock().await;
+    let (bus, conn) = setup().await?;
+    Some((bus, conn, _guard))
 }
 
 fn account(id: &str, provider_type: &str, identity: &str) -> MockAccount {
@@ -326,21 +331,9 @@ async fn serve(conn: &Connection) -> Option<()> {
     Some(())
 }
 
-async fn setup() -> Option<Connection> {
-    let conn = session_connection().await?;
-    serve(&conn).await?;
-    Some(conn)
-}
-
-async fn busy_setup() -> Option<(Connection, tokio::sync::MutexGuard<'static, ()>)> {
-    let _guard = BUS_LOCK.lock().await;
-    let conn = setup().await?;
-    Some((conn, _guard))
-}
-
 #[tokio::test]
 async fn account_interface() {
-    let Some((conn, _guard)) = busy_setup().await else {
+    let Some((_bus, conn, _guard)) = busy_setup().await else {
         return;
     };
 
@@ -366,7 +359,7 @@ async fn account_interface() {
 
 #[tokio::test]
 async fn mail_interface() {
-    let Some((conn, _guard)) = busy_setup().await else {
+    let Some((_bus, conn, _guard)) = busy_setup().await else {
         return;
     };
 
@@ -388,7 +381,7 @@ async fn mail_interface() {
 
 #[tokio::test]
 async fn oauth2_interface() {
-    let Some((conn, _guard)) = busy_setup().await else {
+    let Some((_bus, conn, _guard)) = busy_setup().await else {
         return;
     };
 
@@ -409,7 +402,7 @@ async fn oauth2_interface() {
 
 #[tokio::test]
 async fn object_manager() {
-    let Some((conn, _guard)) = busy_setup().await else {
+    let Some((_bus, conn, _guard)) = busy_setup().await else {
         return;
     };
 
@@ -426,7 +419,7 @@ async fn object_manager() {
 
 #[tokio::test]
 async fn enumerate_mail_accounts() {
-    let Some((conn, _guard)) = busy_setup().await else {
+    let Some((_bus, conn, _guard)) = busy_setup().await else {
         return;
     };
 
@@ -467,7 +460,7 @@ async fn enumerate_mail_accounts() {
 
 #[tokio::test]
 async fn oauth2_token_cache() {
-    let Some((conn, _guard)) = busy_setup().await else {
+    let Some((_bus, conn, _guard)) = busy_setup().await else {
         return;
     };
 
@@ -480,7 +473,7 @@ async fn oauth2_token_cache() {
 
 #[tokio::test]
 async fn oauth2_token_refresh_on_expiry() {
-    let Some((conn, _guard)) = busy_setup().await else {
+    let Some((_bus, conn, _guard)) = busy_setup().await else {
         return;
     };
 

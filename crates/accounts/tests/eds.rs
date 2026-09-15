@@ -3,11 +3,14 @@
 
 use std::collections::HashMap;
 
+mod session_bus;
+
 use accounts::eds::SourceData;
 use accounts::eds::discover::{discover_mail_accounts, mail_accounts_from_dir};
 use accounts::eds::enumerate::{Source, enumerate_mail_accounts, mail_accounts};
+use session_bus::TestBus;
 use tempfile::TempDir;
-use zbus::connection::{Builder, Connection};
+use zbus::connection::Connection;
 use zbus::interface;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
@@ -170,15 +173,10 @@ impl BrokenObjectManager {
     }
 }
 
-async fn session_connection() -> Option<Connection> {
-    let builder = match Builder::session() {
-        Ok(builder) => builder,
-        Err(_) => {
-            eprintln!("no session bus available; run via `dbus-run-session -- cargo test`");
-            return None;
-        }
-    };
-    builder.name(SERVICE).ok()?.build().await.ok()
+async fn session_connection() -> Option<(TestBus, Connection)> {
+    let bus = TestBus::start()?;
+    let conn = bus.connection(&[SERVICE]).await?;
+    Some((bus, conn))
 }
 
 async fn serve(conn: &Connection) -> Option<()> {
@@ -211,7 +209,7 @@ async fn serve(conn: &Connection) -> Option<()> {
 #[tokio::test]
 async fn enumerate_mail_accounts_from_sources() {
     let _guard = BUS_LOCK.lock().await;
-    let Some(conn) = session_connection().await else {
+    let Some((_bus, conn)) = session_connection().await else {
         return;
     };
     let Some(()) = serve(&conn).await else {
@@ -279,7 +277,7 @@ async fn discover_falls_back_to_disk() {
     let _guard = BUS_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     write_sources(dir.path(), &disk_fixtures());
-    let Some(conn) = session_connection().await else {
+    let Some((_bus, conn)) = session_connection().await else {
         return;
     };
     conn.object_server()
@@ -299,7 +297,7 @@ async fn discover_propagates_other_errors() {
     let _guard = BUS_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     write_sources(dir.path(), &disk_fixtures());
-    let Some(conn) = session_connection().await else {
+    let Some((_bus, conn)) = session_connection().await else {
         return;
     };
     conn.object_server()
