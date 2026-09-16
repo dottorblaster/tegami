@@ -1460,6 +1460,7 @@ version = "0.1.0"
 dependencies = [
  "async-imap",
  "futures-util",
+ "imap-proto",
  "lettre",
  "mail-builder",
  "mail-parser",

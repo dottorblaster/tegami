@@ -94,6 +94,22 @@ pub enum SyncServiceMsg {
         account_id: i64,
         event: SendEvent,
     },
+    SaveDraft {
+        account_id: i64,
+        raw: Vec<u8>,
+        replace_uid: Option<u32>,
+    },
+    SaveDraftResolved {
+        account_id: i64,
+        folder: String,
+        raw: Vec<u8>,
+        replace_uid: Option<u32>,
+    },
+    DeleteDraft {
+        account_id: i64,
+        folder: String,
+        uid: u32,
+    },
     MessageAction(MessageAction),
     MessageActionResolved(ResolvedAction),
     Failed {
@@ -116,6 +132,10 @@ pub enum SyncServiceOutput {
     },
     SendResult {
         sent: bool,
+    },
+    DraftSaved {
+        folder: String,
+        uid: u32,
     },
     Error {
         detail: String,
@@ -260,13 +280,20 @@ impl SyncService {
                 if let Some(worker) = self.send_workers.get(&account_id) {
                     worker.send(SendCommand::Drain);
                 }
+                if let Some(worker) = self.workers.get(&account_id) {
+                    worker.send(WorkerCommand::SaveSent);
+                }
             }
             WorkerEvent::Disconnected
             | WorkerEvent::FlagsChanged { .. }
             | WorkerEvent::MessagesMoved { .. }
             | WorkerEvent::OpsReplayed(_)
+            | WorkerEvent::SentSaved(_)
             | WorkerEvent::OfflineQueued { .. }
             | WorkerEvent::Idle(_) => {}
+            WorkerEvent::DraftSaved { folder, uid, .. } => {
+                let _ = sender.output(SyncServiceOutput::DraftSaved { folder, uid });
+            }
         }
     }
 
@@ -284,6 +311,11 @@ impl SyncService {
                     retried = report.retried,
                     "outbox drained"
                 );
+                if report.sent > 0
+                    && let Some(worker) = self.workers.get(&account_id)
+                {
+                    worker.send(WorkerCommand::SaveSent);
+                }
                 let _ = sender.output(SyncServiceOutput::SendResult {
                     sent: report.sent > 0,
                 });
@@ -301,6 +333,32 @@ impl SyncService {
         if let Some(worker) = self.workers.get(&account_id) {
             worker.send(WorkerCommand::Watch { folder });
         }
+    }
+
+    fn save_draft(
+        &mut self,
+        account_id: i64,
+        raw: Vec<u8>,
+        replace_uid: Option<u32>,
+        sender: &ComponentSender<SyncService>,
+    ) {
+        let store = self.store.clone();
+        let draft_sender = sender.clone();
+        sender.oneshot_command(async move {
+            let Some((_, folder)) = drafts_folder(&store, account_id).await else {
+                warn!(account_id, "no drafts folder");
+                let _ = draft_sender.output(SyncServiceOutput::Error {
+                    detail: "No drafts folder available".to_string(),
+                });
+                return;
+            };
+            draft_sender.input(SyncServiceMsg::SaveDraftResolved {
+                account_id,
+                folder,
+                raw,
+                replace_uid,
+            });
+        });
     }
 
     fn check_new_mail(&self, folder_id: i64, uids: Vec<u32>, sender: &ComponentSender<Self>) {
@@ -437,6 +495,36 @@ impl SimpleComponent for SyncService {
             SyncServiceMsg::SendEvent { account_id, event } => {
                 self.handle_send_event(account_id, event, &sender);
             }
+            SyncServiceMsg::SaveDraft {
+                account_id,
+                raw,
+                replace_uid,
+            } => {
+                self.save_draft(account_id, raw, replace_uid, &sender);
+            }
+            SyncServiceMsg::SaveDraftResolved {
+                account_id,
+                folder,
+                raw,
+                replace_uid,
+            } => {
+                if let Some(worker) = self.workers.get(&account_id) {
+                    worker.send(WorkerCommand::AppendDraft {
+                        folder,
+                        raw,
+                        replace_uid,
+                    });
+                }
+            }
+            SyncServiceMsg::DeleteDraft {
+                account_id,
+                folder,
+                uid,
+            } => {
+                if let Some(worker) = self.workers.get(&account_id) {
+                    worker.send(WorkerCommand::DeleteDraft { folder, uid });
+                }
+            }
             SyncServiceMsg::MessageAction(action) => {
                 let store = self.store.clone();
                 let action_sender = sender.clone();
@@ -489,6 +577,19 @@ async fn new_mail_notices(
         });
     }
     (!notices.is_empty()).then_some((folder_title, notices))
+}
+
+async fn drafts_folder(store: &Store, account_id: i64) -> Option<(i64, String)> {
+    let folders = store.folders(account_id).await.ok()?;
+    let folder = folders
+        .iter()
+        .find(|folder| folder.special_use == Some(SpecialUse::Drafts))
+        .or_else(|| {
+            folders
+                .iter()
+                .find(|folder| folder.name.eq_ignore_ascii_case("drafts"))
+        })?;
+    Some((folder.id?, folder.name.clone()))
 }
 
 async fn resolve_folder(store: &Store, folder_id: i64) -> Result<(i64, String), String> {
@@ -747,6 +848,45 @@ mod tests {
             uids: vec![1],
         };
         assert!(resolve_action(&store, action).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn picks_the_drafts_folder_by_role_then_name() {
+        let (store, account_id, _, _) = seeded().await;
+
+        let mut drafts = folder(account_id, "Drafts");
+        drafts.special_use = Some(SpecialUse::Drafts);
+        store.upsert_folder(drafts).await.unwrap();
+        let (id, name) = drafts_folder(&store, account_id).await.unwrap();
+        assert_eq!(name, "Drafts");
+        assert!(store.folder(id).await.unwrap().is_some());
+
+        let inbox = store.folders(account_id).await.unwrap();
+        assert!(drafts_folder(&store, account_id).await.is_some());
+        let _ = inbox;
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_a_folder_named_drafts() {
+        let (store, account_id, _, _) = seeded().await;
+        store
+            .upsert_folder(FolderRecord {
+                special_use: None,
+                ..folder(account_id, "Sent")
+            })
+            .await
+            .unwrap();
+        assert!(drafts_folder(&store, account_id).await.is_none());
+
+        store
+            .upsert_folder(FolderRecord {
+                special_use: None,
+                ..folder(account_id, "Drafts")
+            })
+            .await
+            .unwrap();
+        let (_, name) = drafts_folder(&store, account_id).await.unwrap();
+        assert_eq!(name, "Drafts");
     }
 
     fn message(folder_id: i64, uid: u32) -> MessageRecord {

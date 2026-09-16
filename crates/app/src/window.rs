@@ -16,7 +16,7 @@ use relm4::prelude::*;
 use tracing::{debug, warn};
 
 use crate::application::{About, Quit};
-use crate::composer::{self, Composer, ComposerInit, ComposerOutput, MessageDraft};
+use crate::composer::{self, Composer, ComposerInit, ComposerMsg, ComposerOutput, MessageDraft};
 use crate::config;
 use crate::conversation::{AnchorState, Conversation, ConversationMsg, ConversationOutput};
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
@@ -46,6 +46,7 @@ pub struct Window {
     move_actions: Option<gio::SimpleActionGroup>,
     move_menu_dirty: Cell<bool>,
     composer: Option<Controller<Composer>>,
+    pending_draft: Option<composer::DraftRef>,
 }
 
 #[derive(Debug)]
@@ -102,6 +103,12 @@ pub enum WindowMsg {
     ReplyAll,
     Forward,
     ReplyDraft(MessageDraft),
+    EditDraft,
+    SaveDraft(MessageDraft),
+    DraftSaved {
+        folder: String,
+        uid: u32,
+    },
     DraftReady(composer::MessageDraft),
     SendResult {
         sent: bool,
@@ -206,6 +213,14 @@ impl SimpleComponent for Window {
                         #[wrap(Some)]
                         set_child = &adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
+                                #[name(edit_draft_button)]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "document-edit-symbolic",
+                                    set_tooltip_text: Some("Edit draft"),
+                                    set_visible: false,
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::EditDraft),
+                                },
+
                                 #[name(reply_button)]
                                 pack_start = &gtk::Button {
                                     set_icon_name: "mail-reply-sender-symbolic",
@@ -330,6 +345,9 @@ impl SimpleComponent for Window {
                         notices,
                     },
                     SyncServiceOutput::SendResult { sent } => WindowMsg::SendResult { sent },
+                    SyncServiceOutput::DraftSaved { folder, uid } => {
+                        WindowMsg::DraftSaved { folder, uid }
+                    }
                     SyncServiceOutput::Error { detail } => WindowMsg::SyncError { detail },
                 });
         let mut model = Window {
@@ -349,6 +367,7 @@ impl SimpleComponent for Window {
             move_actions: None,
             move_menu_dirty: Cell::new(false),
             composer: None,
+            pending_draft: None,
         };
 
         let folder_tree = model.folder_tree.widget();
@@ -539,7 +558,30 @@ impl SimpleComponent for Window {
             WindowMsg::ReplyDraft(draft) => {
                 self.open_composer(Some(draft), &sender);
             }
+            WindowMsg::EditDraft => self.start_edit_draft(&sender),
+            WindowMsg::SaveDraft(draft) => {
+                let Some(account_id) = draft.identity.as_ref().map(|identity| identity.account_id)
+                else {
+                    warn!("draft has no sender identity");
+                    return;
+                };
+                let replace_uid = draft.draft.as_ref().map(|draft| draft.uid);
+                match mail_core::compose::build(&composer::outgoing(&draft)) {
+                    Ok(raw) => self.sync_service.emit(SyncServiceMsg::SaveDraft {
+                        account_id,
+                        raw,
+                        replace_uid,
+                    }),
+                    Err(err) => warn!(detail = %err, "failed to build draft"),
+                }
+            }
+            WindowMsg::DraftSaved { folder, uid } => {
+                if let Some(composer) = &self.composer {
+                    composer.emit(ComposerMsg::DraftSaved { folder, uid });
+                }
+            }
             WindowMsg::DraftReady(draft) => {
+                self.pending_draft = draft.draft.clone();
                 let Some(account_id) = draft.identity.as_ref().map(|identity| identity.account_id)
                 else {
                     warn!("draft has no sender identity");
@@ -567,6 +609,13 @@ impl SimpleComponent for Window {
                     composer.widget().close();
                     self.toast(sent);
                 }
+                if sent && let Some(draft) = self.pending_draft.take() {
+                    self.sync_service.emit(SyncServiceMsg::DeleteDraft {
+                        account_id: draft.account_id,
+                        folder: draft.folder,
+                        uid: draft.uid,
+                    });
+                }
             }
             WindowMsg::SyncError { detail } => {
                 debug!(detail, "sync error");
@@ -577,6 +626,13 @@ impl SimpleComponent for Window {
     fn post_view(&self, _widgets: &mut Self::Widgets) {
         let enabled = self.anchor.is_some();
         let flagged = self.anchor.as_ref().is_some_and(|anchor| anchor.flagged);
+        let drafts = self.anchor.as_ref().is_some_and(|anchor| {
+            self.account_folders.iter().any(|folder| {
+                folder.id == Some(anchor.folder_id)
+                    && folder.special_use == Some(SpecialUse::Drafts)
+            })
+        });
+        edit_draft_button.set_visible(drafts);
         reply_button.set_sensitive(enabled);
         reply_all_button.set_sensitive(enabled);
         forward_button.set_sensitive(enabled);
@@ -613,6 +669,7 @@ impl Window {
             })
             .forward(sender.input_sender(), |msg| match msg {
                 ComposerOutput::Send(draft) => WindowMsg::DraftReady(draft),
+                ComposerOutput::SaveDraft(draft) => WindowMsg::SaveDraft(draft),
             });
         self.composer = Some(composer);
     }
@@ -627,6 +684,20 @@ impl Window {
             match reply_draft(&store, anchor.folder_id, anchor.uid, mode).await {
                 Ok(draft) => reply_sender.input(WindowMsg::ReplyDraft(draft)),
                 Err(detail) => debug!(detail, "cannot compose reply"),
+            }
+        });
+    }
+
+    fn start_edit_draft(&self, sender: &ComponentSender<Self>) {
+        let Some(anchor) = self.anchor.clone() else {
+            return;
+        };
+        let store = self.store.clone();
+        let edit_sender = sender.clone();
+        sender.oneshot_command(async move {
+            match edit_draft(&store, anchor.folder_id, anchor.uid).await {
+                Ok(draft) => edit_sender.input(WindowMsg::ReplyDraft(draft)),
+                Err(detail) => debug!(detail, "cannot open draft"),
             }
         });
     }
@@ -831,6 +902,54 @@ async fn reply_draft(
         attachments: outgoing.attachments,
         in_reply_to: outgoing.in_reply_to,
         references: outgoing.references,
+        draft: None,
+    })
+}
+
+async fn edit_draft(store: &Store, folder_id: i64, uid: u32) -> Result<MessageDraft, String> {
+    let message = store
+        .message(folder_id, uid)
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "message not found".to_string())?;
+    let raw_path = message
+        .raw_path
+        .as_deref()
+        .ok_or_else(|| "message body is not cached".to_string())?;
+    let raw = tokio::fs::read(raw_path)
+        .await
+        .map_err(|err| err.to_string())?;
+    let folder = store
+        .folder(folder_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "folder not found".to_string())?;
+    let accounts = store.accounts().await.map_err(|err| err.to_string())?;
+    let identity = accounts
+        .into_iter()
+        .find(|account| account.id == Some(folder.account_id))
+        .map(|account| composer::Identity {
+            account_id: account.id.unwrap_or_default(),
+            name: account.display_name.clone().unwrap_or_default(),
+            email: account.email.clone(),
+        });
+    let outgoing = mail_core::compose::parse_outgoing(&raw)
+        .ok_or_else(|| "cannot parse the draft".to_string())?;
+    Ok(MessageDraft {
+        identity,
+        to: composer::render_addresses(&outgoing.to),
+        cc: composer::render_addresses(&outgoing.cc),
+        bcc: composer::render_addresses(&outgoing.bcc),
+        subject: outgoing.subject,
+        body: outgoing.text.unwrap_or_default(),
+        attachments: outgoing.attachments,
+        in_reply_to: outgoing.in_reply_to,
+        references: outgoing.references,
+        draft: Some(composer::DraftRef {
+            account_id: folder.account_id,
+            folder: folder.name,
+            uid,
+        }),
     })
 }
 
@@ -979,6 +1098,42 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn edit_draft_reopens_a_saved_draft_for_editing() {
+        let (store, dir) = seeded().await;
+        let account_id = store.accounts().await.unwrap()[0].id.unwrap();
+        let mut drafts = folder(account_id);
+        drafts.name = "Drafts".to_string();
+        drafts.display_name = Some("Drafts".to_string());
+        drafts.special_use = Some(SpecialUse::Drafts);
+        let drafts_id = store.upsert_folder(drafts).await.unwrap();
+
+        let raw = concat!(
+            "From: user@example.org\r\n",
+            "To: \"Hopper, G\" <g@navy.dev>, grace@navy.dev\r\n",
+            "Subject: Draft note\r\n",
+            "Message-ID: <draft@example.org>\r\n",
+            "In-Reply-To: <orig@example.org>\r\n",
+            "\r\n",
+            "Saved body\r\n",
+        );
+        let raw_path = dir.path().join("draft.eml").to_string_lossy().into_owned();
+        std::fs::write(&raw_path, raw).unwrap();
+        let mut message = message(drafts_id, &raw_path);
+        message.uid = 9;
+        store.upsert_message(message).await.unwrap();
+
+        let draft = edit_draft(&store, drafts_id, 9).await.unwrap();
+        assert_eq!(draft.to, "\"Hopper, G\" <g@navy.dev>, grace@navy.dev");
+        assert_eq!(draft.subject, "Draft note");
+        assert_eq!(draft.body.trim_end(), "Saved body");
+        assert_eq!(draft.in_reply_to.as_deref(), Some("orig@example.org"));
+        let draft_ref = draft.draft.unwrap();
+        assert_eq!(draft_ref.folder, "Drafts");
+        assert_eq!(draft_ref.uid, 9);
+        assert_eq!(draft_ref.account_id, account_id);
+    }
+
     #[test]
     fn draft_from_outgoing_carries_everything() {
         let outgoing = OutgoingMessage {
@@ -1012,6 +1167,7 @@ mod tests {
             attachments: outgoing.attachments,
             in_reply_to: outgoing.in_reply_to,
             references: outgoing.references,
+            draft: None,
         };
         assert_eq!(draft.to, "Ada Lovelace <ada@lovelace.dev>");
         assert_eq!(draft.cc, "\"Hopper, G\" <g@navy.dev>");

@@ -338,6 +338,9 @@ impl MailBackend for FakeBackend {
     }
 
     async fn append(&mut self, folder: &str, flags: MessageFlags, raw: &[u8]) -> Result<u32> {
+        if !self.folders.iter().any(|(name, _)| name == folder) {
+            return Err(MailError::Protocol(format!("no such folder {folder}")));
+        }
         let uid = self
             .folder(folder)
             .map(|envelopes| {
@@ -357,6 +360,21 @@ impl MailBackend for FakeBackend {
         }
         self.bodies.push(((folder.to_string(), uid), raw.to_vec()));
         Ok(uid)
+    }
+
+    async fn delete_permanently(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
+        self.flag_calls.push((
+            folder.to_string(),
+            uids.to_vec(),
+            FlagChange {
+                deleted: Some(true),
+                ..FlagChange::default()
+            },
+        ));
+        for uid in uids {
+            self.expunge(folder, *uid);
+        }
+        Ok(())
     }
 
     async fn idle(&mut self, _folder: &str) -> Result<()> {

@@ -11,7 +11,8 @@ use async_imap::extensions::idle::IdleResponse;
 use async_imap::types::{Flag, NameAttribute};
 use async_imap::{Client, Session};
 use futures_util::StreamExt;
-use tokio::io::{AsyncRead, AsyncWrite};
+use imap_proto::{Response, ResponseCode, UidSetMember};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::account::AccountConfig;
@@ -52,6 +53,7 @@ pub struct ImapBackend {
     supports_move: bool,
     supports_condstore: bool,
     supports_qresync: bool,
+    supports_uidplus: bool,
 }
 
 impl ImapBackend {
@@ -62,6 +64,7 @@ impl ImapBackend {
             supports_move: false,
             supports_condstore: false,
             supports_qresync: false,
+            supports_uidplus: false,
         }
     }
 
@@ -147,6 +150,7 @@ impl MailBackend for ImapBackend {
         self.supports_move = has("MOVE");
         self.supports_condstore = has("CONDSTORE");
         self.supports_qresync = has("QRESYNC");
+        self.supports_uidplus = has("UIDPLUS");
         if self.supports_qresync {
             session
                 .run_command_and_check_ok("ENABLE QRESYNC")
@@ -379,14 +383,32 @@ impl MailBackend for ImapBackend {
     }
 
     async fn append(&mut self, folder: &str, flags: MessageFlags, raw: &[u8]) -> Result<u32> {
-        let folder = folder.to_string();
-        let flags = append_flags(flags);
-        let raw = raw.to_vec();
-        self.session()?
-            .append(folder, Some(&flags), None, &raw)
+        append_uidplus(self.session()?, folder, &append_flags(flags), raw).await
+    }
+
+    async fn delete_permanently(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let id_set = uid_set(uids);
+        self.select_mailbox(folder).await?;
+        let supports_uidplus = self.supports_uidplus;
+        let session = self.session()?;
+        if supports_uidplus {
+            match session
+                .run_command_and_check_ok(format!("UID EXPUNGE {id_set}"))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(_) => {
+                    // UIDPLUS advertised but UID EXPUNGE rejected: fall back.
+                }
+            }
+        }
+        session
+            .run_command_and_check_ok("EXPUNGE")
             .await
-            .map_err(map_err)?;
-        Ok(0)
+            .map_err(map_err)
     }
 
     async fn idle(&mut self, folder: &str) -> Result<()> {
@@ -575,6 +597,79 @@ fn flag_add_remove(
     }
 }
 
+async fn append_uidplus(
+    session: &mut Session<Stream>,
+    folder: &str,
+    flags: &str,
+    raw: &[u8],
+) -> Result<u32> {
+    let command = append_command(folder, flags, raw.len());
+    let id = session.run_command(command).await.map_err(map_err)?;
+    let response = session
+        .read_response()
+        .await?
+        .ok_or(MailError::Disconnected)?;
+    if !matches!(response.parsed(), Response::Continue { .. }) {
+        return Err(MailError::Protocol(
+            "expected APPEND continuation".to_string(),
+        ));
+    }
+    let stream = session.get_mut();
+    stream.write_all(raw).await?;
+    stream.write_all(b"\r\n").await?;
+    stream.flush().await?;
+    loop {
+        let data = session
+            .read_response()
+            .await?
+            .ok_or(MailError::Disconnected)?;
+        if data.request_id() != Some(&id) {
+            continue;
+        }
+        let Response::Done {
+            status,
+            code,
+            information,
+            ..
+        } = data.parsed()
+        else {
+            continue;
+        };
+        if status != &imap_proto::Status::Ok {
+            let detail = information
+                .as_ref()
+                .map(|information| information.to_string())
+                .unwrap_or_else(|| "APPEND failed".to_string());
+            return Err(MailError::Protocol(detail));
+        }
+        return Ok(append_uid(code.as_ref()));
+    }
+}
+
+fn append_command(folder: &str, flags: &str, len: usize) -> String {
+    let folder = folder.replace('\\', "\\\\").replace('"', "\\\"");
+    let flags = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" ({flags})")
+    };
+    format!("APPEND \"{folder}\"{flags} {{{len}}}")
+}
+
+fn append_uid(code: Option<&ResponseCode<'_>>) -> u32 {
+    match code {
+        Some(ResponseCode::AppendUid(_, uids)) => uids.first().map(uid_member).unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn uid_member(member: &UidSetMember) -> u32 {
+    match member {
+        UidSetMember::Uid(uid) => *uid,
+        UidSetMember::UidRange(range) => *range.start(),
+    }
+}
+
 fn append_flags(flags: MessageFlags) -> String {
     let mut result = Vec::new();
     if flags.seen {
@@ -679,5 +774,46 @@ mod tests {
         super::flag_add_remove(&mut additions, &mut removals, &change.draft, "\\Draft");
         assert_eq!(additions, vec!["\\Seen"]);
         assert_eq!(removals, vec!["\\Flagged"]);
+    }
+
+    #[test]
+    fn append_command_quotes_folders_and_flags() {
+        assert_eq!(
+            super::append_command("INBOX", "", 5),
+            "APPEND \"INBOX\" {5}"
+        );
+        assert_eq!(
+            super::append_command("INBOX", "\\Seen", 5),
+            "APPEND \"INBOX\" (\\Seen) {5}"
+        );
+        assert_eq!(
+            super::append_command("[Gmail]/Sent Mail", "\\Seen", 1024),
+            "APPEND \"[Gmail]/Sent Mail\" (\\Seen) {1024}"
+        );
+        assert_eq!(
+            super::append_command("a\"b", "", 1),
+            "APPEND \"a\\\"b\" {1}"
+        );
+    }
+
+    #[test]
+    fn append_uid_reads_the_uidplus_response_code() {
+        use imap_proto::{ResponseCode, UidSetMember};
+        assert_eq!(
+            super::append_uid(Some(&ResponseCode::AppendUid(
+                38505,
+                vec![UidSetMember::Uid(3955)]
+            ))),
+            3955
+        );
+        assert_eq!(
+            super::append_uid(Some(&ResponseCode::AppendUid(
+                38505,
+                vec![UidSetMember::UidRange(100..=200)]
+            ))),
+            100
+        );
+        assert_eq!(super::append_uid(None), 0);
+        assert_eq!(super::append_uid(Some(&ResponseCode::UidNext(9))), 0);
     }
 }

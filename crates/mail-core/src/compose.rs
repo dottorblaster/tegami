@@ -228,6 +228,41 @@ pub fn reply(raw: &[u8], me: Option<&Address>, mode: ReplyMode) -> Option<Outgoi
     }
 }
 
+/// Reconstructs an [`OutgoingMessage`] from a previously built raw message.
+/// Used to reopen a saved draft for editing: recipients, subject, threading
+/// headers, the first text body and the non-inline attachments come back.
+pub fn parse_outgoing(raw: &[u8]) -> Option<OutgoingMessage> {
+    let parsed = crate::mime::parse(raw)?;
+    let message = MessageParser::default().parse(raw)?;
+    Some(OutgoingMessage {
+        from: message
+            .from()
+            .and_then(|from| parsed_addresses(from).into_iter().next()),
+        to: message.to().map(parsed_addresses).unwrap_or_default(),
+        cc: message.cc().map(parsed_addresses).unwrap_or_default(),
+        bcc: message.bcc().map(parsed_addresses).unwrap_or_default(),
+        subject: message.subject().unwrap_or("").trim().to_string(),
+        text: parsed.text,
+        html: parsed.html,
+        attachments: forwarded_attachments(&parsed.attachments),
+        inline: Vec::new(),
+        in_reply_to: message
+            .in_reply_to()
+            .as_text()
+            .map(trim_message_id)
+            .map(str::to_string),
+        references: message
+            .references()
+            .as_text_list()
+            .map(|list| {
+                list.iter()
+                    .map(|id| trim_message_id(id).to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
 fn forward(raw: &[u8], message: &Message<'_>, subject: &str) -> Option<OutgoingMessage> {
     let parsed = crate::mime::parse(raw)?;
     let mut body = forwarded_header(message);
@@ -829,5 +864,42 @@ mod tests {
             replied.text.as_deref(),
             Some("a@example.org wrote:\n> hi\n")
         );
+    }
+
+    #[test]
+    fn parse_outgoing_round_trips_a_built_message() {
+        let message = OutgoingMessage {
+            from: Some(Address::new(
+                Some("Ada Lovelace".to_string()),
+                "ada@lovelace.dev",
+            )),
+            to: parse_addresses("grace@navy.dev"),
+            cc: parse_addresses("cc@example.org"),
+            bcc: parse_addresses("bcc@example.org"),
+            subject: "Greetings".to_string(),
+            text: Some("Hello there".to_string()),
+            in_reply_to: Some("orig@example.org".to_string()),
+            references: vec!["zero@example.org".to_string()],
+            attachments: vec![OutgoingAttachment {
+                filename: "notes.txt".to_string(),
+                mime_type: "text/plain".to_string(),
+                data: b"notes".to_vec(),
+            }],
+            ..OutgoingMessage::default()
+        };
+        let raw = build(&message).unwrap();
+        let restored = parse_outgoing(&raw).unwrap();
+
+        assert_eq!(restored.to.len(), 1);
+        assert_eq!(restored.to[0].email, "grace@navy.dev");
+        assert_eq!(restored.cc[0].email, "cc@example.org");
+        assert_eq!(restored.bcc[0].email, "bcc@example.org");
+        assert_eq!(restored.subject, "Greetings");
+        assert!(restored.text.as_deref().unwrap().contains("Hello there"));
+        assert_eq!(restored.in_reply_to.as_deref(), Some("orig@example.org"));
+        assert_eq!(restored.references, vec!["zero@example.org"]);
+        assert_eq!(restored.attachments.len(), 1);
+        assert_eq!(restored.attachments[0].filename, "notes.txt");
+        assert_eq!(restored.attachments[0].data, b"notes");
     }
 }

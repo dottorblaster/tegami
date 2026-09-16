@@ -9,8 +9,9 @@ use crate::backend::Credential;
 use crate::envelope::FlagChange;
 use crate::store::{SpecialUse, Store};
 use crate::sync::{
-    EnvelopeWindow, FolderSync, IdleEvent, ReplayReport, fetch_body as fetch_message_body,
-    queue_delete, queue_move, queue_set_flags, replay_pending, sync_account, sync_folder,
+    EnvelopeWindow, FolderSync, IdleEvent, ReplayReport, SaveReport,
+    fetch_body as fetch_message_body, queue_delete, queue_move, queue_set_flags, replay_pending,
+    save_draft as save_draft_message, save_sent as save_sent_messages, sync_account, sync_folder,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,16 @@ pub enum WorkerCommand {
         folder: String,
         uids: Vec<u32>,
     },
+    SaveSent,
+    AppendDraft {
+        folder: String,
+        raw: Vec<u8>,
+        replace_uid: Option<u32>,
+    },
+    DeleteDraft {
+        folder: String,
+        uid: u32,
+    },
     Watch {
         folder: String,
     },
@@ -79,6 +90,12 @@ pub enum WorkerEvent {
         uids: Vec<u32>,
     },
     OpsReplayed(ReplayReport),
+    SentSaved(SaveReport),
+    DraftSaved {
+        folder: String,
+        uid: u32,
+        replace_uid: Option<u32>,
+    },
     OfflineQueued {
         folder: String,
         uids: Vec<u32>,
@@ -501,12 +518,90 @@ impl<B: MailBackend> Worker<B> {
         }
     }
 
+    async fn save_sent(&mut self) {
+        match save_sent_messages(&mut self.backend, &self.store, self.config.account_id).await {
+            Ok(report) => {
+                if report.saved > 0 || report.failed > 0 {
+                    let _ = self.emit(WorkerEvent::SentSaved(report));
+                }
+                if report.saved > 0
+                    && let Some(name) = self.special_folder(SpecialUse::Sent).await
+                {
+                    self.queue
+                        .push_back(WorkerCommand::SyncFolder { folder: name });
+                }
+            }
+            Err(err) => {
+                let _ = self.emit(WorkerEvent::Failed {
+                    operation: "save sent",
+                    detail: err.to_string(),
+                });
+            }
+        }
+    }
+
+    async fn append_draft(&mut self, folder: &str, raw: &[u8], replace_uid: Option<u32>) {
+        match save_draft_message(&mut self.backend, folder, raw, replace_uid).await {
+            Ok(uid) => {
+                let _ = self.emit(WorkerEvent::DraftSaved {
+                    folder: folder.to_string(),
+                    uid,
+                    replace_uid,
+                });
+                self.queue.push_back(WorkerCommand::SyncFolder {
+                    folder: folder.to_string(),
+                });
+            }
+            Err(err) => {
+                self.connected = false;
+                let _ = self.emit(WorkerEvent::Failed {
+                    operation: "save draft",
+                    detail: err.to_string(),
+                });
+            }
+        }
+    }
+
+    async fn delete_draft(&mut self, folder: &str, uid: u32) {
+        match self.backend.delete_permanently(folder, &[uid]).await {
+            Ok(()) => {
+                self.queue.push_back(WorkerCommand::SyncFolder {
+                    folder: folder.to_string(),
+                });
+            }
+            Err(err) => {
+                self.connected = false;
+                let _ = self.emit(WorkerEvent::Failed {
+                    operation: "delete draft",
+                    detail: err.to_string(),
+                });
+            }
+        }
+    }
+
+    async fn special_folder(&self, special_use: SpecialUse) -> Option<String> {
+        match self.store.folders(self.config.account_id).await {
+            Ok(folders) => folders
+                .into_iter()
+                .find(|folder| folder.special_use == Some(special_use))
+                .map(|folder| folder.name),
+            Err(err) => {
+                let _ = self.emit(WorkerEvent::Failed {
+                    operation: "folder lookup",
+                    detail: err.to_string(),
+                });
+                None
+            }
+        }
+    }
+
     async fn handle(&mut self, command: WorkerCommand) -> bool {
         match command {
             WorkerCommand::Shutdown => return false,
             WorkerCommand::Sync => {
                 if self.ensure_connected().await {
                     self.replay().await;
+                    self.save_sent().await;
                     self.sync_account().await;
                     self.adopt_default_watch().await;
                 }
@@ -555,6 +650,35 @@ impl<B: MailBackend> Worker<B> {
                     self.delete(&folder, &uids).await;
                 } else {
                     self.queue_deletes(&folder, &uids).await;
+                }
+            }
+            WorkerCommand::SaveSent => {
+                if self.ensure_connected().await {
+                    self.save_sent().await;
+                }
+            }
+            WorkerCommand::AppendDraft {
+                folder,
+                raw,
+                replace_uid,
+            } => {
+                if self.ensure_connected().await {
+                    self.append_draft(&folder, &raw, replace_uid).await;
+                } else {
+                    let _ = self.emit(WorkerEvent::Failed {
+                        operation: "save draft",
+                        detail: "backend is not connected".to_string(),
+                    });
+                }
+            }
+            WorkerCommand::DeleteDraft { folder, uid } => {
+                if self.ensure_connected().await {
+                    self.delete_draft(&folder, uid).await;
+                } else {
+                    let _ = self.emit(WorkerEvent::Failed {
+                        operation: "delete draft",
+                        detail: "backend is not connected".to_string(),
+                    });
                 }
             }
             WorkerCommand::Watch { folder } => {

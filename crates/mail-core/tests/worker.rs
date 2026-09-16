@@ -6,7 +6,7 @@ use common::FakeBackend;
 use mail_core::account::AccountConfig;
 use mail_core::envelope::FlagChange;
 use mail_core::store::{
-    AccountRecord, AccountSource, AuthKind, BodyState, FLAG_SEEN, OpKind, Store,
+    AccountRecord, AccountSource, AuthKind, BodyState, FLAG_SEEN, OpKind, Store, bits_to_flags,
 };
 use mail_core::sync::{EnvelopeWindow, IdleEvent, ReplayReport, queue_set_flags};
 use mail_core::worker::{AccountWorker, WorkerCommand, WorkerConfig, WorkerEvent};
@@ -374,4 +374,64 @@ async fn worker_queues_actions_while_offline() {
     assert_eq!(ops[2].uid, Some(9));
 
     worker.shutdown();
+}
+
+#[tokio::test]
+async fn worker_appends_and_replaces_drafts() {
+    let backend = FakeBackend::with_folders(&[("INBOX", 1), ("Drafts", 1)]);
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let temp = TempDir::new().unwrap();
+    let (mut worker, mut events) = AccountWorker::spawn(
+        backend,
+        store.clone(),
+        worker_config(account_id, temp.path()),
+    );
+
+    assert_eq!(recv(&mut events).await, WorkerEvent::Connected);
+    assert_eq!(
+        recv(&mut events).await,
+        WorkerEvent::OpsReplayed(ReplayReport {
+            replayed: 0,
+            dropped: 0,
+            remaining: 0,
+        })
+    );
+    loop {
+        match recv(&mut events).await {
+            WorkerEvent::AccountSynced { folders } => {
+                assert_eq!(folders, 2);
+                break;
+            }
+            _ => continue,
+        }
+    }
+    let drafts_id = folder_id(&store, account_id, "Drafts").await;
+    assert!(store.message(drafts_id, 1).await.unwrap().is_some());
+
+    worker.send(WorkerCommand::AppendDraft {
+        folder: "Drafts".to_string(),
+        raw: b"From: me@example.org\r\nSubject: draft v2\r\n\r\nbody\r\n".to_vec(),
+        replace_uid: Some(1),
+    });
+    assert!(matches!(
+        recv(&mut events).await,
+        WorkerEvent::DraftSaved {
+            folder,
+            uid: 2,
+            replace_uid: Some(1),
+        } if folder == "Drafts"
+    ));
+    assert!(matches!(
+        recv(&mut events).await,
+        WorkerEvent::FolderSynced(report) if report.folder_id == drafts_id
+    ));
+
+    let messages = store.messages(drafts_id).await.unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].uid, 2);
+    assert!(bits_to_flags(messages[0].flags).draft);
+
+    worker.shutdown();
+    assert_eq!(recv(&mut events).await, WorkerEvent::Disconnected);
 }

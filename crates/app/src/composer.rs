@@ -34,6 +34,15 @@ impl Identity {
     }
 }
 
+/// Identifies a draft already stored in a folder, so saving it again can
+/// replace the previous version and sending it can remove it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftRef {
+    pub account_id: i64,
+    pub folder: String,
+    pub uid: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageDraft {
     pub identity: Option<Identity>,
@@ -45,6 +54,7 @@ pub struct MessageDraft {
     pub attachments: Vec<OutgoingAttachment>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    pub draft: Option<DraftRef>,
 }
 
 /// Everything the composer needs to start: the store for identities and an
@@ -56,6 +66,7 @@ pub struct ComposerInit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerOutput {
     Send(MessageDraft),
+    SaveDraft(MessageDraft),
 }
 
 pub fn identities(accounts: &[AccountRecord]) -> Vec<Identity> {
@@ -101,6 +112,7 @@ pub fn draft(
         attachments: Vec::new(),
         in_reply_to: None,
         references: Vec::new(),
+        draft: None,
     }
 }
 
@@ -164,6 +176,7 @@ pub struct Composer {
     attachments: Vec<OutgoingAttachment>,
     in_reply_to: Option<String>,
     references: Vec<String>,
+    draft: Option<DraftRef>,
     pending: Option<MessageDraft>,
     to_entry: Option<gtk::Entry>,
     cc_entry: Option<gtk::Entry>,
@@ -172,6 +185,7 @@ pub struct Composer {
     identity_dropdown: Option<gtk::DropDown>,
     body_view: Option<gtk::TextView>,
     attachments_slot: Option<gtk::Box>,
+    save_draft_button: Option<gtk::Button>,
     toast_overlay: Option<adw::ToastOverlay>,
 }
 
@@ -185,6 +199,8 @@ pub enum ComposerMsg {
     SubjectChanged(String),
     ToggleCc,
     Send,
+    SaveDraft,
+    DraftSaved { folder: String, uid: u32 },
 }
 
 #[relm4::component(pub)]
@@ -207,6 +223,14 @@ impl SimpleComponent for Composer {
             adw::ToastOverlay {
                 adw::ToolbarView {
                     add_top_bar = &adw::HeaderBar {
+                        #[name(save_draft_button)]
+                        pack_start = &gtk::Button {
+                            set_icon_name: "document-save-symbolic",
+                            set_tooltip_text: Some("Save draft"),
+                            set_sensitive: false,
+                            connect_clicked[sender] => move |_| sender.input(ComposerMsg::SaveDraft),
+                        },
+
                         #[name(send_button)]
                         pack_end = &gtk::Button {
                             set_label: "Send",
@@ -399,7 +423,9 @@ impl SimpleComponent for Composer {
             identity_dropdown: None,
             body_view: None,
             attachments_slot: None,
+            save_draft_button: None,
             toast_overlay: None,
+            draft: None,
         };
         let widgets = view_output!();
         model.to_entry = Some(widgets.to_entry.clone());
@@ -409,7 +435,9 @@ impl SimpleComponent for Composer {
         model.identity_dropdown = Some(widgets.identity_dropdown.clone());
         model.body_view = Some(widgets.body_view.clone());
         model.attachments_slot = Some(widgets.attachments_slot.clone());
+        model.save_draft_button = Some(widgets.save_draft_button.clone());
         model.toast_overlay = Some(widgets.toast_overlay.clone());
+        widgets.save_draft_button.set_sensitive(false);
 
         let store = model.store.clone();
         let load_sender = sender.clone();
@@ -439,6 +467,7 @@ impl SimpleComponent for Composer {
                 if let Some(draft) = self.pending.take() {
                     self.apply_draft(draft);
                 }
+                self.post_identities();
             }
             ComposerMsg::IdentitySelected(index) => self.selected_identity = index as usize,
             ComposerMsg::ToChanged(value) => self.to = value,
@@ -462,7 +491,39 @@ impl SimpleComponent for Composer {
                 draft.attachments = self.attachments.clone();
                 draft.in_reply_to = self.in_reply_to.clone();
                 draft.references = self.references.clone();
+                draft.draft = self.draft.clone();
                 let _ = sender.output(ComposerOutput::Send(draft));
+            }
+            ComposerMsg::SaveDraft => {
+                let Some(identity) = self.identity() else {
+                    return;
+                };
+                let mut draft = draft(
+                    Some(identity),
+                    &self.to,
+                    &self.cc,
+                    &self.bcc,
+                    &self.subject,
+                    &self.body(),
+                );
+                draft.attachments = self.attachments.clone();
+                draft.in_reply_to = self.in_reply_to.clone();
+                draft.references = self.references.clone();
+                draft.draft = self.draft.clone();
+                let _ = sender.output(ComposerOutput::SaveDraft(draft));
+            }
+            ComposerMsg::DraftSaved { folder, uid } => {
+                let account_id = self.identity().map(|identity| identity.account_id);
+                if let Some(account_id) = account_id {
+                    self.draft = Some(DraftRef {
+                        account_id,
+                        folder,
+                        uid,
+                    });
+                }
+                if let Some(overlay) = &self.toast_overlay {
+                    overlay.add_toast(adw::Toast::new("Draft saved"));
+                }
             }
         }
     }
@@ -482,6 +543,7 @@ impl Composer {
         self.attachments = draft.attachments.clone();
         self.in_reply_to = draft.in_reply_to.clone();
         self.references = draft.references.clone();
+        self.draft = draft.draft.clone();
 
         if let Some(entry) = &self.to_entry {
             entry.set_text(&draft.to);
@@ -511,6 +573,13 @@ impl Composer {
         }
 
         self.sync_attachments();
+    }
+
+    fn post_identities(&self) {
+        let identity = self.identities.get(self.selected_identity);
+        if let Some(button) = &self.save_draft_button {
+            button.set_sensitive(identity.is_some());
+        }
     }
 
     fn sync_attachments(&mut self) {

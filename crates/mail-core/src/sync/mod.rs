@@ -5,6 +5,7 @@ mod body;
 mod idle;
 mod message;
 mod ops;
+mod save;
 
 use std::collections::HashSet;
 
@@ -19,6 +20,7 @@ pub use ops::{
     ReplayReport, decode_flag_change, encode_flag_change, queue_delete, queue_move,
     queue_set_flags, replay_pending,
 };
+pub use save::{SaveReport, draft_flags, save_draft, save_sent, sent_flags};
 
 #[derive(Debug)]
 pub enum SyncError {
