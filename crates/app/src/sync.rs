@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use accounts::AccountManager;
 use accounts::CredentialWorker;
-use imap::ImapBackend;
 use mail_core::account::AccountConfig;
 use mail_core::envelope::FlagChange;
+use mail_core::imap::ImapBackend;
 use mail_core::store::{SpecialUse, Store, bits_to_flags};
 use mail_core::sync::EnvelopeWindow;
 use mail_core::worker::{AccountWorker, WorkerCommand, WorkerConfig, WorkerEvent};

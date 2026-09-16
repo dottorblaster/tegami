@@ -14,12 +14,12 @@ use futures_util::StreamExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 
-use mail_core::account::AccountConfig;
-use mail_core::backend::Result;
-use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
-use mail_core::{Credential, Folder, FolderDelta, FolderRole, FolderState, MailBackend, MailError};
+use crate::account::AccountConfig;
+use crate::backend::Result;
+use crate::envelope::{Address, Envelope, FlagChange, MessageFlags};
+use crate::{Credential, Folder, FolderDelta, FolderRole, FolderState, MailBackend, MailError};
 
-use crate::auth::Xoauth2;
+use super::auth::Xoauth2;
 
 const IDLE_CYCLE: Duration = Duration::from_secs(60);
 
@@ -597,7 +597,7 @@ fn append_flags(flags: MessageFlags) -> String {
 
 #[cfg(test)]
 mod tests {
-    use mail_core::envelope::{FlagChange, MessageFlags};
+    use crate::envelope::{FlagChange, MessageFlags};
 
     use super::{append_flags, delta_query, display_name, folder_role, uid_set};
 
@@ -626,23 +626,23 @@ mod tests {
     fn folder_role_maps_attributes() {
         use async_imap::types::NameAttribute;
         let inbox = folder_role("INBOX", &[NameAttribute::NoInferiors]);
-        assert_eq!(inbox, mail_core::FolderRole::Inbox);
+        assert_eq!(inbox, crate::FolderRole::Inbox);
         let drafts = folder_role(
             "[Gmail]/Drafts",
             &[NameAttribute::NoSelect, NameAttribute::Drafts],
         );
-        assert_eq!(drafts, mail_core::FolderRole::Drafts);
+        assert_eq!(drafts, crate::FolderRole::Drafts);
         let other = folder_role("Work", &[NameAttribute::NoInferiors]);
-        assert_eq!(other, mail_core::FolderRole::Other);
+        assert_eq!(other, crate::FolderRole::Other);
         let important = folder_role(
             "[Gmail]/Important",
             &[NameAttribute::Extension("\\Important".into())],
         );
-        assert_eq!(important, mail_core::FolderRole::Important);
+        assert_eq!(important, crate::FolderRole::Important);
         let all = folder_role("All Mail", &[NameAttribute::All]);
-        assert_eq!(all, mail_core::FolderRole::All);
+        assert_eq!(all, crate::FolderRole::All);
         let flagged = folder_role("Starred", &[NameAttribute::Flagged]);
-        assert_eq!(flagged, mail_core::FolderRole::Flagged);
+        assert_eq!(flagged, crate::FolderRole::Flagged);
     }
 
     #[test]

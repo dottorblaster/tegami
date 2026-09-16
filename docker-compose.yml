@@ -1,8 +1,8 @@
-# GreenMail IMAP test server for the integration tests in
-# crates/imap/tests/greenmail.rs.
+# GreenMail IMAP/SMTP test server for the integration tests in
+# crates/mail-core/tests/imap.rs and crates/mail-core/tests/smtp.rs.
 #
 #   docker compose up -d
-#   TEGAMI_GREENMAIL_HOST=localhost cargo test -p imap
+#   TEGAMI_GREENMAIL_HOST=localhost cargo test -p mail-core
 #
 # The same image and options are used by CI (see .github/workflows/ci.yml).
 services:

@@ -58,7 +58,6 @@ version = "0.1.0"
 dependencies = [
  "accounts",
  "base64 0.22.1",
- "imap",
  "mail-core",
  "relm4",
  "tokio",
@@ -1276,20 +1275,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "imap"
-version = "0.1.0"
-dependencies = [
- "async-imap",
- "futures-util",
- "mail-core",
- "rustls",
- "rustls-native-certs",
- "tempfile",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
 name = "imap-proto"
 version = "0.16.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1528,11 +1513,17 @@ dependencies = [
 name = "mail-core"
 version = "0.1.0"
 dependencies = [
+ "async-imap",
+ "futures-util",
+ "lettre",
  "mail-builder",
  "mail-parser",
  "rusqlite",
+ "rustls",
+ "rustls-native-certs",
  "tempfile",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
@@ -2328,16 +2319,6 @@ name = "smallvec"
 version = "1.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
-
-[[package]]
-name = "smtp"
-version = "0.1.0"
-dependencies = [
- "lettre",
- "mail-core",
- "tokio",
- "tracing",
-]
 
 [[package]]
 name = "socket2"

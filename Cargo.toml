@@ -1,21 +1,13 @@
 # Tegami -- a mail client for GNOME.
 #
 # Workspace layout:
-#   crates/mail-core  -- UI-free mail model and backend abstractions
+#   crates/mail-core  -- UI-free mail model, backends, store and sync
 #   crates/accounts   -- GOA-backed account discovery + credentials
-#   crates/imap       -- IMAP backend
-#   crates/smtp       -- SMTP sender
 #   crates/app        -- the GNOME application shell
 
 [workspace]
 resolver = "3"
-members = [
-    "crates/mail-core",
-    "crates/accounts",
-    "crates/imap",
-    "crates/smtp",
-    "crates/app",
-]
+members = ["crates/mail-core", "crates/accounts", "crates/app"]
 
 # Metadata shared by every member via `version.workspace = true` & co.,
 # so they stay in lockstep.

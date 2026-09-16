@@ -8,14 +8,14 @@
 //! trusted local relays. Authentication follows the credential kind, using
 //! XOAUTH2 for OAuth2 accounts and PLAIN/LOGIN for password accounts.
 
+use crate::account::SmtpConfig;
+use crate::send::{MailEnvelope, MailSender};
+use crate::{Credential, MailError};
 use lettre::address::Envelope;
 use lettre::transport::AsyncTransport;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, Tokio1Executor};
-use mail_core::account::SmtpConfig;
-use mail_core::send::{MailEnvelope, MailSender};
-use mail_core::{Credential, MailError};
 
 /// Default port for implicit TLS (SMTPS).
 pub const SUBMISSIONS_PORT: u16 = 465;
@@ -291,7 +291,7 @@ mod tests {
     fn rejects_invalid_addresses() {
         let envelope = MailEnvelope {
             from: None,
-            recipients: vec![mail_core::compose::Address::new(None, "not an address")],
+            recipients: vec![crate::compose::Address::new(None, "not an address")],
         };
         assert!(lettre_envelope(&envelope).is_err());
     }

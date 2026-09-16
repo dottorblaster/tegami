@@ -3,9 +3,9 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use imap::ImapBackend;
 use mail_core::account::{AccountConfig, ImapConfig};
 use mail_core::envelope::MessageFlags;
+use mail_core::imap::ImapBackend;
 use mail_core::store::{AccountRecord, AccountSource, AuthKind, BodyState, Store, fts_query};
 use mail_core::sync::{EnvelopeWindow, IdleEvent, IdleWorker, fetch_body, sync_account};
 use mail_core::{Credential, MailBackend};
