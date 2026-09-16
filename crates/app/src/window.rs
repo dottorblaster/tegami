@@ -36,6 +36,7 @@ pub struct Window {
     conversation: Controller<Conversation>,
     sync_service: Controller<SyncService>,
     split_view: Option<adw::NavigationSplitView>,
+    toast_overlay: Option<adw::ToastOverlay>,
     mailbox_page_title: String,
     selected_folder_id: Option<i64>,
     anchor: Option<AnchorState>,
@@ -97,6 +98,9 @@ pub enum WindowMsg {
     },
     Compose,
     DraftReady(composer::MessageDraft),
+    SendResult {
+        sent: bool,
+    },
 }
 
 #[relm4::component(pub)]
@@ -113,8 +117,10 @@ impl SimpleComponent for Window {
             set_width_request: 360,
             set_height_request: 294,
 
-            #[name(outer_view)]
-            adw::OverlaySplitView {
+            #[name(toast_overlay)]
+            adw::ToastOverlay {
+                #[name(outer_view)]
+                adw::OverlaySplitView {
                 set_max_sidebar_width: 260.0,
                 set_sidebar_width_fraction: 0.179,
 
@@ -235,6 +241,7 @@ impl SimpleComponent for Window {
                     },
                 },
             },
+            },
 
             add_breakpoint = collapse_breakpoint(COLLAPSE_FOLDERS_WIDTH, &outer_view),
             add_breakpoint = collapse_breakpoint(COLLAPSE_READING_WIDTH, &inner_view),
@@ -293,6 +300,7 @@ impl SimpleComponent for Window {
                         folder_title,
                         notices,
                     },
+                    SyncServiceOutput::SendResult { sent } => WindowMsg::SendResult { sent },
                     SyncServiceOutput::Error { detail } => WindowMsg::SyncError { detail },
                 });
         let mut model = Window {
@@ -303,6 +311,7 @@ impl SimpleComponent for Window {
             conversation,
             sync_service,
             split_view: None,
+            toast_overlay: None,
             mailbox_page_title: "Inbox".to_string(),
             selected_folder_id: None,
             anchor: None,
@@ -318,6 +327,7 @@ impl SimpleComponent for Window {
         let conversation = model.conversation.widget();
         let widgets = view_output!();
         model.split_view = Some(widgets.inner_view.clone());
+        model.toast_overlay = Some(widgets.toast_overlay.clone());
 
         let menu = gio::Menu::new();
         menu.append_item(&gio::MenuItem::new(
@@ -495,20 +505,33 @@ impl SimpleComponent for Window {
                 }
             }
             WindowMsg::DraftReady(draft) => {
-                sender.oneshot_command(async move {
-                    let message = composer::outgoing(&draft);
-                    match mail_core::compose::build(&message) {
-                        Ok(raw) => debug!(
+                let Some(account_id) = draft.identity.as_ref().map(|identity| identity.account_id)
+                else {
+                    warn!("draft has no sender identity");
+                    return;
+                };
+                let message = composer::outgoing(&draft);
+                match mail_core::compose::build(&message) {
+                    Ok(raw) => {
+                        debug!(
                             bytes = raw.len(),
                             to = %draft.to,
                             subject = %draft.subject,
-                            "composed message built"
-                        ),
-                        Err(err) => {
-                            warn!(detail = %err, "failed to build composed message")
-                        }
+                            "enqueuing composed message"
+                        );
+                        self.sync_service
+                            .emit(SyncServiceMsg::Send { account_id, raw });
                     }
-                });
+                    Err(err) => {
+                        warn!(detail = %err, "failed to build composed message");
+                    }
+                }
+            }
+            WindowMsg::SendResult { sent } => {
+                if let Some(composer) = &self.composer {
+                    composer.widget().close();
+                    self.toast(sent);
+                }
             }
             WindowMsg::SyncError { detail } => {
                 debug!(detail, "sync error");
@@ -567,6 +590,17 @@ impl Window {
         self.move_menu = Some(menu);
         self.move_actions = Some(group);
         self.move_menu_dirty.set(true);
+    }
+
+    fn toast(&self, sent: bool) {
+        if let Some(overlay) = &self.toast_overlay {
+            let label = if sent {
+                "Message sent"
+            } else {
+                "Message queued for delivery"
+            };
+            overlay.add_toast(adw::Toast::new(label));
+        }
     }
 
     fn reload_folder(&self, folder_id: i64) {

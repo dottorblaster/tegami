@@ -28,3 +28,12 @@ pub fn attachment_dir() -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).expect("failed to create attachment cache directory");
     dir
 }
+
+/// The directory holding the built MIME of queued outbound messages.
+pub fn outbox_dir() -> std::path::PathBuf {
+    let dir = relm4::gtk::glib::user_data_dir()
+        .join("tegami")
+        .join("outbox");
+    std::fs::create_dir_all(&dir).expect("failed to create outbox directory");
+    dir
+}

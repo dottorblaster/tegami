@@ -182,6 +182,8 @@ pub const ATTACHMENT_COLUMNS: &str =
     "id, message_id, part_id, filename, mime_type, size, content_id, disk_path";
 pub const PENDING_OP_COLUMNS: &str =
     "id, account_id, op_kind, folder_id, target_folder_id, uid, payload, created_at";
+pub const OUTBOX_COLUMNS: &str =
+    "id, account_id, raw_path, state, send_after, attempts, last_error, created_at";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FolderRecord {
@@ -366,6 +368,76 @@ impl PendingOpRecord {
             target_folder_id: row.get(4)?,
             uid: row.get(5)?,
             payload: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxState {
+    Queued,
+    Sending,
+    Sent,
+    Failed,
+}
+
+impl OutboxState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Sending => "sending",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutboxRecord {
+    pub id: Option<i64>,
+    pub account_id: i64,
+    pub raw_path: String,
+    pub state: OutboxState,
+    pub send_after: Option<i64>,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+    pub created_at: Option<i64>,
+}
+
+impl OutboxRecord {
+    pub fn queued(account_id: i64, raw_path: String, created_at: i64) -> Self {
+        Self {
+            id: None,
+            account_id,
+            raw_path,
+            state: OutboxState::Queued,
+            send_after: None,
+            attempts: 0,
+            last_error: None,
+            created_at: Some(created_at),
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self.state, OutboxState::Queued | OutboxState::Sending)
+    }
+
+    pub fn from_row(row: &Row<'_>) -> Result<Self, Error> {
+        let state: String = row.get(3)?;
+        Ok(Self {
+            id: Some(row.get(0)?),
+            account_id: row.get(1)?,
+            raw_path: row.get(2)?,
+            state: match state.as_str() {
+                "queued" => OutboxState::Queued,
+                "sending" => OutboxState::Sending,
+                "sent" => OutboxState::Sent,
+                "failed" => OutboxState::Failed,
+                other => return Err(bad_enum(3, other)),
+            },
+            send_after: row.get(4)?,
+            attempts: row.get(5)?,
+            last_error: row.get(6)?,
             created_at: row.get(7)?,
         })
     }

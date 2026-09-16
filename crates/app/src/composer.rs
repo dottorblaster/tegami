@@ -16,8 +16,6 @@ use relm4::gtk::prelude::*;
 use relm4::prelude::*;
 use tracing::debug;
 
-const SEND_UNAVAILABLE: &str = "Sending isn't available yet";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     pub account_id: i64,
@@ -382,9 +380,6 @@ impl SimpleComponent for Composer {
                     &self.subject,
                     &self.body(),
                 );
-                if let Some(overlay) = &self.toast_overlay {
-                    overlay.add_toast(adw::Toast::new(SEND_UNAVAILABLE));
-                }
                 let _ = sender.output(ComposerOutput::Send(draft));
             }
         }

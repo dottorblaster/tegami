@@ -17,8 +17,8 @@ use tokio::sync::{mpsc, oneshot};
 use super::error::{StoreError, StoreResult};
 use super::models::{
     ACCOUNT_COLUMNS, ATTACHMENT_COLUMNS, AccountRecord, AttachmentRecord, BodyState,
-    FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord, PENDING_OP_COLUMNS,
-    PendingOpRecord, SearchHit,
+    FOLDER_COLUMNS, FolderRecord, MESSAGE_COLUMNS, MessageRecord, OUTBOX_COLUMNS, OutboxRecord,
+    OutboxState, PENDING_OP_COLUMNS, PendingOpRecord, SearchHit,
 };
 use super::schema;
 use crate::threading::{self, ThreadMessage};
@@ -120,6 +120,31 @@ enum Command {
         reply: oneshot::Sender<StoreResult<Vec<PendingOpRecord>>>,
     },
     DeleteOp {
+        id: i64,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    EnqueueOutbox {
+        entry: OutboxRecord,
+        reply: oneshot::Sender<StoreResult<i64>>,
+    },
+    Outbox {
+        account_id: i64,
+        reply: oneshot::Sender<StoreResult<Vec<OutboxRecord>>>,
+    },
+    DueOutbox {
+        account_id: i64,
+        now: i64,
+        reply: oneshot::Sender<StoreResult<Vec<OutboxRecord>>>,
+    },
+    UpdateOutbox {
+        id: i64,
+        state: OutboxState,
+        attempts: i64,
+        last_error: Option<String>,
+        send_after: Option<i64>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
+    DeleteOutbox {
         id: i64,
         reply: oneshot::Sender<StoreResult<()>>,
     },
@@ -350,6 +375,56 @@ impl Store {
         receiver.await.map_err(|_| StoreError::Closed)?
     }
 
+    pub async fn enqueue_outbox(&self, entry: OutboxRecord) -> StoreResult<i64> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::EnqueueOutbox { entry, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn outbox(&self, account_id: i64) -> StoreResult<Vec<OutboxRecord>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::Outbox { account_id, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn due_outbox(&self, account_id: i64, now: i64) -> StoreResult<Vec<OutboxRecord>> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::DueOutbox {
+            account_id,
+            now,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn update_outbox(
+        &self,
+        id: i64,
+        state: OutboxState,
+        attempts: i64,
+        last_error: Option<String>,
+        send_after: Option<i64>,
+    ) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::UpdateOutbox {
+            id,
+            state,
+            attempts,
+            last_error,
+            send_after,
+            reply,
+        })
+        .await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
+    pub async fn delete_outbox(&self, id: i64) -> StoreResult<()> {
+        let (reply, receiver) = oneshot::channel();
+        self.send(Command::DeleteOutbox { id, reply }).await?;
+        receiver.await.map_err(|_| StoreError::Closed)?
+    }
+
     pub async fn index_body(&self, message_id: i64, text: String) -> StoreResult<()> {
         let (reply, receiver) = oneshot::channel();
         self.send(Command::IndexBody {
@@ -557,6 +632,31 @@ fn worker(mut receiver: mpsc::Receiver<Command>, path: &Path) -> StoreResult<()>
                 reply_send(reply, pending_ops(&connection, account_id))
             }
             Command::DeleteOp { id, reply } => reply_send(reply, delete_op(&connection, id)),
+            Command::EnqueueOutbox { entry, reply } => {
+                reply_send(reply, enqueue_outbox(&connection, &entry))
+            }
+            Command::Outbox { account_id, reply } => {
+                reply_send(reply, outbox(&connection, account_id))
+            }
+            Command::DueOutbox {
+                account_id,
+                now,
+                reply,
+            } => reply_send(reply, due_outbox(&connection, account_id, now)),
+            Command::UpdateOutbox {
+                id,
+                state,
+                attempts,
+                last_error,
+                send_after,
+                reply,
+            } => reply_send(
+                reply,
+                update_outbox(&connection, id, state, attempts, last_error, send_after),
+            ),
+            Command::DeleteOutbox { id, reply } => {
+                reply_send(reply, delete_outbox(&connection, id))
+            }
             Command::IndexBody {
                 message_id,
                 text,
@@ -726,6 +826,8 @@ fn prune_accounts(connection: &mut Connection, keep: &[(String, String)]) -> Sto
             "DELETE FROM message_fts WHERE rowid IN (SELECT m.id FROM message m JOIN folder f ON f.id = m.folder_id WHERE f.account_id = ?1)",
             [account_id],
         )?;
+        transaction.execute("DELETE FROM outbox WHERE account_id = ?1", [account_id])?;
+        transaction.execute("DELETE FROM pending_op WHERE account_id = ?1", [account_id])?;
         transaction.execute("DELETE FROM account WHERE id = ?1", [account_id])?;
     }
     transaction.commit()?;
@@ -1005,6 +1107,72 @@ fn pending_ops(connection: &Connection, account_id: i64) -> StoreResult<Vec<Pend
 
 fn delete_op(connection: &Connection, id: i64) -> StoreResult<()> {
     connection.execute("DELETE FROM pending_op WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+fn enqueue_outbox(connection: &Connection, entry: &OutboxRecord) -> StoreResult<i64> {
+    let created_at = entry.created_at.unwrap_or_else(now);
+    connection.execute(
+        "INSERT INTO outbox (account_id, raw_path, state, send_after, attempts, last_error, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            entry.account_id,
+            entry.raw_path,
+            entry.state.as_str(),
+            entry.send_after,
+            entry.attempts,
+            entry.last_error,
+            created_at,
+        ],
+    )?;
+    Ok(connection.last_insert_rowid())
+}
+
+fn outbox(connection: &Connection, account_id: i64) -> StoreResult<Vec<OutboxRecord>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {OUTBOX_COLUMNS} FROM outbox WHERE account_id = ?1 \
+         ORDER BY COALESCE(send_after, 0), id"
+    ))?;
+    let rows = statement
+        .query_map([account_id], OutboxRecord::from_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn due_outbox(
+    connection: &Connection,
+    account_id: i64,
+    now: i64,
+) -> StoreResult<Vec<OutboxRecord>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {OUTBOX_COLUMNS} FROM outbox \
+         WHERE account_id = ?1 AND state IN ('queued', 'sending') \
+         AND (send_after IS NULL OR send_after <= ?2) \
+         ORDER BY COALESCE(send_after, 0), id"
+    ))?;
+    let rows = statement
+        .query_map(rusqlite::params![account_id, now], OutboxRecord::from_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn update_outbox(
+    connection: &Connection,
+    id: i64,
+    state: OutboxState,
+    attempts: i64,
+    last_error: Option<String>,
+    send_after: Option<i64>,
+) -> StoreResult<()> {
+    connection.execute(
+        "UPDATE outbox SET state = ?1, attempts = ?2, last_error = ?3, send_after = ?4 WHERE id = ?5",
+        rusqlite::params![state.as_str(), attempts, last_error, send_after, id],
+    )?;
+    Ok(())
+}
+
+fn delete_outbox(connection: &Connection, id: i64) -> StoreResult<()> {
+    connection.execute("DELETE FROM outbox WHERE id = ?1", [id])?;
     Ok(())
 }
 

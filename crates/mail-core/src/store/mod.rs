@@ -17,7 +17,8 @@ mod worker;
 pub use error::{StoreError, StoreResult};
 pub use models::{
     AccountRecord, AccountSource, AttachmentRecord, AuthKind, BodyState, FolderRecord,
-    MessageRecord, OpKind, PendingOpRecord, SearchHit, Security, SpecialUse,
+    MessageRecord, OpKind, OutboxRecord, OutboxState, PendingOpRecord, SearchHit, Security,
+    SpecialUse,
 };
 pub use worker::Store;
 

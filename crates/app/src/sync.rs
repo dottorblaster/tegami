@@ -7,6 +7,8 @@ use accounts::CredentialWorker;
 use mail_core::account::AccountConfig;
 use mail_core::envelope::FlagChange;
 use mail_core::imap::ImapBackend;
+use mail_core::send_worker::{SendCommand, SendEvent, SendWorker, SendWorkerConfig};
+use mail_core::smtp::SmtpSender;
 use mail_core::store::{SpecialUse, Store, bits_to_flags};
 use mail_core::sync::EnvelopeWindow;
 use mail_core::worker::{AccountWorker, WorkerCommand, WorkerConfig, WorkerEvent};
@@ -84,6 +86,14 @@ pub enum SyncServiceMsg {
         folder: String,
         uid: u32,
     },
+    Send {
+        account_id: i64,
+        raw: Vec<u8>,
+    },
+    SendEvent {
+        account_id: i64,
+        event: SendEvent,
+    },
     MessageAction(MessageAction),
     MessageActionResolved(ResolvedAction),
     Failed {
@@ -104,6 +114,9 @@ pub enum SyncServiceOutput {
         folder_title: String,
         notices: Vec<MailNotice>,
     },
+    SendResult {
+        sent: bool,
+    },
     Error {
         detail: String,
     },
@@ -112,7 +125,9 @@ pub enum SyncServiceOutput {
 pub struct SyncService {
     store: Arc<Store>,
     body_dir: PathBuf,
+    outbox_dir: PathBuf,
     workers: HashMap<i64, AccountWorker>,
+    send_workers: HashMap<i64, SendWorker>,
     watching: bool,
     synced_folders: HashSet<i64>,
 }
@@ -141,20 +156,69 @@ impl SyncService {
         });
     }
 
+    fn spawn_send_worker(
+        &mut self,
+        account: &ServiceAccount,
+        sender: &ComponentSender<SyncService>,
+    ) {
+        let Some(smtp) = account.config.smtp.as_ref() else {
+            debug!(
+                account = account.config.id,
+                "no smtp config, skipping send worker"
+            );
+            return;
+        };
+        let transport = match SmtpSender::new(smtp, &account.credential) {
+            Ok(transport) => transport,
+            Err(err) => {
+                warn!(account = account.config.id, detail = %err, "cannot build smtp transport");
+                return;
+            }
+        };
+        let account_id = account.account_id;
+        let (worker, events) = SendWorker::spawn(
+            transport,
+            self.store.as_ref().clone(),
+            SendWorkerConfig {
+                account_id,
+                raw_dir: self.outbox_dir.clone(),
+            },
+        );
+        self.send_workers.insert(account_id, worker);
+        let bridge = sender.clone();
+        relm4::spawn(async move {
+            let mut events = events;
+            while let Some(event) = events.recv().await {
+                bridge.input(SyncServiceMsg::SendEvent { account_id, event });
+            }
+        });
+    }
+
     fn reconcile(&mut self, accounts: Vec<ServiceAccount>, sender: &ComponentSender<SyncService>) {
         let mut seen: HashSet<i64> = HashSet::new();
         for account in accounts {
             seen.insert(account.account_id);
-            if self.workers.contains_key(&account.account_id) {
-                continue;
+            if !self.workers.contains_key(&account.account_id) {
+                self.spawn_worker(account.clone(), sender);
             }
-            self.spawn_worker(account, sender);
+            if !self.send_workers.contains_key(&account.account_id) {
+                self.spawn_send_worker(&account, sender);
+            }
         }
         self.workers.retain(|account_id, worker| {
             if seen.contains(account_id) {
                 true
             } else {
                 debug!(account_id, "account removed, shutting down worker");
+                worker.shutdown();
+                false
+            }
+        });
+        self.send_workers.retain(|account_id, worker| {
+            if seen.contains(account_id) {
+                true
+            } else {
+                debug!(account_id, "account removed, shutting down send worker");
                 worker.shutdown();
                 false
             }
@@ -192,13 +256,44 @@ impl SyncService {
             WorkerEvent::BodyFetched { message_id, .. } => {
                 let _ = sender.output(SyncServiceOutput::BodyFetched { message_id });
             }
-            WorkerEvent::Connected
-            | WorkerEvent::Disconnected
+            WorkerEvent::Connected => {
+                if let Some(worker) = self.send_workers.get(&account_id) {
+                    worker.send(SendCommand::Drain);
+                }
+            }
+            WorkerEvent::Disconnected
             | WorkerEvent::FlagsChanged { .. }
             | WorkerEvent::MessagesMoved { .. }
             | WorkerEvent::OpsReplayed(_)
             | WorkerEvent::OfflineQueued { .. }
             | WorkerEvent::Idle(_) => {}
+        }
+    }
+
+    fn handle_send_event(
+        &mut self,
+        account_id: i64,
+        event: SendEvent,
+        sender: &ComponentSender<SyncService>,
+    ) {
+        match event {
+            SendEvent::Drained(report) => {
+                debug!(
+                    account_id,
+                    sent = report.sent,
+                    retried = report.retried,
+                    "outbox drained"
+                );
+                let _ = sender.output(SyncServiceOutput::SendResult {
+                    sent: report.sent > 0,
+                });
+            }
+            SendEvent::Failed { operation, detail } => {
+                warn!(account_id, operation, detail, "send worker failure");
+                let _ = sender.output(SyncServiceOutput::Error {
+                    detail: format!("{operation}: {detail}"),
+                });
+            }
         }
     }
 
@@ -272,7 +367,9 @@ impl SimpleComponent for SyncService {
         let model = SyncService {
             store,
             body_dir: config::body_dir(),
+            outbox_dir: config::outbox_dir(),
             workers: HashMap::new(),
+            send_workers: HashMap::new(),
             watching: false,
             synced_folders: HashSet::new(),
         };
@@ -330,6 +427,15 @@ impl SimpleComponent for SyncService {
                 if let Some(worker) = self.workers.get(&account_id) {
                     worker.send(WorkerCommand::FetchBody { folder, uid });
                 }
+            }
+            SyncServiceMsg::Send { account_id, raw } => match self.send_workers.get(&account_id) {
+                Some(worker) => {
+                    worker.send(SendCommand::Send { raw });
+                }
+                None => warn!(account_id, "no send worker for account"),
+            },
+            SyncServiceMsg::SendEvent { account_id, event } => {
+                self.handle_send_event(account_id, event, &sender);
             }
             SyncServiceMsg::MessageAction(action) => {
                 let store = self.store.clone();
