@@ -120,6 +120,7 @@ mod tests {
                 smtp: Some(SmtpConfig {
                     accept_ssl_errors: false,
                     host: "smtp.lovelace.dev".to_string(),
+                    port: Some(465),
                     use_auth: true,
                     auth_login: true,
                     auth_plain: false,

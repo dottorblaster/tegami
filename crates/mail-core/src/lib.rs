@@ -13,6 +13,7 @@ pub mod compose;
 pub mod envelope;
 pub mod folder;
 pub mod mime;
+pub mod send;
 pub mod store;
 pub mod sync;
 pub mod threading;

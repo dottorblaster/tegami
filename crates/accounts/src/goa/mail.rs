@@ -44,6 +44,8 @@ pub trait Mail {
     #[zbus(property)]
     fn smtp_host(&self) -> zbus::Result<String>;
 
+    fn smtp_port(&self) -> zbus::Result<u32>;
+
     #[zbus(property)]
     fn smtp_use_auth(&self) -> zbus::Result<bool>;
 

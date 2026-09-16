@@ -99,6 +99,12 @@ async fn mail_account(
         Some(SmtpConfig {
             accept_ssl_errors: mail.smtp_accept_ssl_errors().await.ok()?,
             host: mail.smtp_host().await.ok()?,
+            port: mail
+                .smtp_port()
+                .await
+                .ok()
+                .filter(|port| *port != 0)
+                .map(|port| port as u16),
             use_auth: mail.smtp_use_auth().await.ok()?,
             auth_login: mail.smtp_auth_login().await.ok()?,
             auth_plain: mail.smtp_auth_plain().await.ok()?,

@@ -95,27 +95,26 @@ pub fn parse_addresses(value: &str) -> Vec<Address> {
     let Some(message) = MessageParser::default().parse(raw.as_bytes()) else {
         return Vec::new();
     };
-    let mut addresses = Vec::new();
-    if let Some(parsed) = message.to() {
-        collect(parsed, &mut addresses);
-    }
-    addresses
+    message.to().map(parsed_addresses).unwrap_or_default()
 }
 
-fn collect(parsed: &ParsedAddress<'_>, addresses: &mut Vec<Address>) {
+/// Converts a parsed address header into the address model.
+pub(crate) fn parsed_addresses(parsed: &ParsedAddress<'_>) -> Vec<Address> {
+    let mut addresses = Vec::new();
     match parsed {
         ParsedAddress::List(items) => {
-            items.iter().for_each(|item| push(item, addresses));
+            items.iter().for_each(|item| push(item, &mut addresses));
         }
         ParsedAddress::Group(groups) => {
             for group in groups {
                 group
                     .addresses
                     .iter()
-                    .for_each(|item| push(item, addresses));
+                    .for_each(|item| push(item, &mut addresses));
             }
         }
     }
+    addresses
 }
 
 fn push(item: &mail_parser::Addr<'_>, addresses: &mut Vec<Address>) {

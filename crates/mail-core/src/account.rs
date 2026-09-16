@@ -32,6 +32,7 @@ pub struct ImapConfig {
 pub struct SmtpConfig {
     pub accept_ssl_errors: bool,
     pub host: String,
+    pub port: Option<u16>,
     pub use_auth: bool,
     pub auth_login: bool,
     pub auth_plain: bool,

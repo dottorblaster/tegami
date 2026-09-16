@@ -140,6 +140,11 @@ fn smtp_config(sources: &[Source], identity: &Source) -> Option<SmtpConfig> {
     Some(SmtpConfig {
         accept_ssl_errors: false,
         host: transport.data.string("Authentication", "Host")?,
+        port: transport
+            .data
+            .string("Authentication", "Port")
+            .and_then(|port| port.parse().ok())
+            .filter(|port| *port != 0),
         use_auth: authentication != "none",
         auth_login: authentication == "LOGIN",
         auth_plain: authentication == "PLAIN",

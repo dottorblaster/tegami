@@ -1,0 +1,25 @@
+[package]
+name = "smtp"
+description = "lettre MailSender implementation for Tegami"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lettre = { version = "0.11", default-features = false, features = [
+  "smtp-transport",
+  "tokio1",
+  "tokio1-rustls-tls",
+] }
+mail-core = { path = "../mail-core" }
+tokio = { version = "1", features = ["net", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

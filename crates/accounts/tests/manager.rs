@@ -412,6 +412,7 @@ fn goa_mail_account(entry: &GoaEntry) -> MailAccount {
             smtp: Some(SmtpConfig {
                 accept_ssl_errors: false,
                 host: "smtp.example.org".to_string(),
+                port: Some(465),
                 use_auth: true,
                 auth_login: false,
                 auth_plain: !entry.oauth2,
