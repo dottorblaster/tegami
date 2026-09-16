@@ -539,12 +539,20 @@ fn plan_update(current: &[MessageRow], next: &[MessageRow]) -> UpdatePlan {
     let next_by_uid: HashMap<u32, &MessageRow> = next.iter().map(|row| (row.uid, row)).collect();
     let removes = current
         .iter()
-        .filter(|row| next_by_uid.get(&row.uid).is_none_or(|next| !row.same_ui(next)))
+        .filter(|row| {
+            next_by_uid
+                .get(&row.uid)
+                .is_none_or(|next| !row.same_ui(next))
+        })
         .map(|row| row.uid)
         .collect();
     let inserts = next
         .iter()
-        .filter(|row| current_by_uid.get(&row.uid).is_none_or(|current| !current.same_ui(row)))
+        .filter(|row| {
+            current_by_uid
+                .get(&row.uid)
+                .is_none_or(|current| !current.same_ui(row))
+        })
         .cloned()
         .collect();
     UpdatePlan { removes, inserts }

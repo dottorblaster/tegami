@@ -905,7 +905,9 @@ impl Window {
         if let Some(selected) = self.selected_folder_id
             && self.reload_pending.contains(&selected)
         {
-            self.message_list.emit(MessageListMsg::Load { folder_id: selected });
+            self.message_list.emit(MessageListMsg::Load {
+                folder_id: selected,
+            });
         }
         self.reload_pending.clear();
     }
