@@ -139,8 +139,9 @@ pub trait MailBackend {
         raw: &[u8],
     ) -> impl Future<Output = Result<u32>> + Send;
 
-    /// Removes messages from a folder outright, as opposed to only marking
-    /// them `\Deleted`. Requires UIDPLUS (UID EXPUNGE) when available.
+    /// Removes messages from a folder outright: marks them `\Deleted` and
+    /// expunges them. Uses UIDPLUS (UID EXPUNGE) when available so only the
+    /// requested messages are expunged.
     fn delete_permanently(
         &mut self,
         folder: &str,

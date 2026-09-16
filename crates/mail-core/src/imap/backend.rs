@@ -82,6 +82,45 @@ impl ImapBackend {
             session.select(folder).await.map_err(map_err)
         }
     }
+
+    async fn mark_deleted(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let id_set = uid_set(uids);
+        self.select_mailbox(folder).await?;
+        let session = self.session()?;
+        let mut messages = session
+            .uid_store(&id_set, "+FLAGS.SILENT (\\Deleted)")
+            .await
+            .map_err(map_err)?;
+        while let Some(message) = messages.next().await {
+            message.map_err(map_err)?;
+        }
+        Ok(())
+    }
+
+    async fn expunge(&mut self, folder: &str, uids: &[u32]) -> Result<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let id_set = uid_set(uids);
+        self.select_mailbox(folder).await?;
+        let supports_uidplus = self.supports_uidplus;
+        let session = self.session()?;
+        if supports_uidplus
+            && session
+                .run_command_and_check_ok(format!("UID EXPUNGE {id_set}"))
+                .await
+                .is_ok()
+        {
+            return Ok(());
+        }
+        session
+            .run_command_and_check_ok("EXPUNGE")
+            .await
+            .map_err(map_err)
+    }
 }
 
 fn map_err(err: async_imap::error::Error) -> MailError {
@@ -349,21 +388,23 @@ impl MailBackend for ImapBackend {
         }
         let id_set = uid_set(&uids);
         let supports_move = self.supports_move;
-        let session = self.session()?;
-        session.select(from).await.map_err(map_err)?;
-        if supports_move {
-            session.uid_mv(to, &id_set).await.map_err(map_err)?;
-        } else {
+        {
+            let session = self.session()?;
+            session.select(&from).await.map_err(map_err)?;
+            if supports_move {
+                session.uid_mv(to, &id_set).await.map_err(map_err)?;
+                return Ok(());
+            }
             session.uid_copy(to, &id_set).await.map_err(map_err)?;
             let mut messages = session
-                .uid_store(&id_set, "+FLAGS (\\Deleted)")
+                .uid_store(&id_set, "+FLAGS.SILENT (\\Deleted)")
                 .await
                 .map_err(map_err)?;
             while let Some(message) = messages.next().await {
                 message.map_err(map_err)?;
             }
         }
-        Ok(())
+        self.expunge(&from, &uids).await
     }
 
     async fn copy_messages(&mut self, from: &str, to: &str, uids: &[u32]) -> Result<()> {
@@ -390,25 +431,8 @@ impl MailBackend for ImapBackend {
         if uids.is_empty() {
             return Ok(());
         }
-        let id_set = uid_set(uids);
-        self.select_mailbox(folder).await?;
-        let supports_uidplus = self.supports_uidplus;
-        let session = self.session()?;
-        if supports_uidplus {
-            match session
-                .run_command_and_check_ok(format!("UID EXPUNGE {id_set}"))
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(_) => {
-                    // UIDPLUS advertised but UID EXPUNGE rejected: fall back.
-                }
-            }
-        }
-        session
-            .run_command_and_check_ok("EXPUNGE")
-            .await
-            .map_err(map_err)
+        self.mark_deleted(folder, uids).await?;
+        self.expunge(folder, uids).await
     }
 
     async fn idle(&mut self, folder: &str) -> Result<()> {

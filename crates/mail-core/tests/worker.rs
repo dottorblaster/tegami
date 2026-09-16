@@ -175,6 +175,49 @@ async fn worker_has_backend_visible_to_external_mutations() {
 }
 
 #[tokio::test]
+async fn worker_deletes_messages_from_the_server() {
+    let backend = FakeBackend::with_folders(&[("INBOX", 3)]);
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let temp = TempDir::new().unwrap();
+    let (mut worker, mut events) = AccountWorker::spawn(
+        backend,
+        store.clone(),
+        worker_config(account_id, temp.path()),
+    );
+    let mut drain = 0;
+    while drain < 4 {
+        recv(&mut events).await;
+        drain += 1;
+    }
+    let inbox_id = folder_id(&store, account_id, "INBOX").await;
+
+    assert!(worker.send(WorkerCommand::Delete {
+        folder: "INBOX".to_string(),
+        uids: vec![2],
+    }));
+
+    assert_eq!(
+        recv(&mut events).await,
+        WorkerEvent::FlagsChanged {
+            folder: "INBOX".to_string(),
+            uids: vec![2],
+        }
+    );
+    let report = recv(&mut events).await;
+    assert!(matches!(report, WorkerEvent::FolderSynced(report) if report.folder_id == inbox_id));
+    let uids: Vec<u32> = store
+        .messages(inbox_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|message| message.uid)
+        .collect();
+    assert_eq!(uids, vec![1, 3]);
+    worker.shutdown();
+}
+
+#[tokio::test]
 async fn worker_fetches_body_into_cache() {
     let mut backend = FakeBackend::with_folders(&[("INBOX", 1)]);
     backend.set_body("INBOX", 1, b"Subject: hello\r\n\r\ngreeting\r\n");

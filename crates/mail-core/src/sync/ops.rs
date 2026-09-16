@@ -134,11 +134,7 @@ async fn apply<B: MailBackend + ?Sized>(
             backend.move_messages(folder, target, &[uid]).await?;
         }
         OpKind::Delete => {
-            let change = FlagChange {
-                deleted: Some(true),
-                ..FlagChange::default()
-            };
-            backend.set_flags(folder, &[uid], change).await?;
+            backend.delete_permanently(folder, &[uid]).await?;
         }
     }
     Ok(Outcome::Applied)

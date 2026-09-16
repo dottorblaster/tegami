@@ -392,11 +392,7 @@ impl<B: MailBackend> Worker<B> {
         if uids.is_empty() {
             return;
         }
-        let change = FlagChange {
-            deleted: Some(true),
-            ..FlagChange::default()
-        };
-        match self.backend.set_flags(folder, uids, change).await {
+        match self.backend.delete_permanently(folder, uids).await {
             Ok(()) => {
                 let _ = self.emit(WorkerEvent::FlagsChanged {
                     folder: folder.to_string(),
