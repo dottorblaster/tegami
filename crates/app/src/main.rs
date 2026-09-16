@@ -11,6 +11,7 @@ mod logging;
 mod message_list;
 mod message_text;
 mod notify;
+mod search;
 mod sidebar;
 mod sync;
 mod window;

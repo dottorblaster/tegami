@@ -21,6 +21,7 @@ use crate::config;
 use crate::conversation::{AnchorState, Conversation, ConversationMsg, ConversationOutput};
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
 use crate::notify::{self, MailNotice};
+use crate::search::{SearchMsg, SearchOutput, SearchView};
 use crate::sidebar::{FolderKey, FolderTree, FolderTreeMsg, FolderTreeOutput};
 use crate::sync::{MessageAction, SyncService, SyncServiceMsg, SyncServiceOutput};
 
@@ -34,10 +35,14 @@ pub struct Window {
     window: adw::ApplicationWindow,
     folder_tree: Controller<FolderTree>,
     message_list: Controller<MessageList>,
+    search_view: Controller<SearchView>,
     conversation: Controller<Conversation>,
     sync_service: Controller<SyncService>,
     split_view: Option<adw::NavigationSplitView>,
     toast_overlay: Option<adw::ToastOverlay>,
+    search_bar: Option<gtk::SearchBar>,
+    search_entry: Option<gtk::SearchEntry>,
+    searching: bool,
     mailbox_page_title: String,
     selected_folder_id: Option<i64>,
     anchor: Option<AnchorState>,
@@ -99,6 +104,10 @@ pub enum WindowMsg {
         target_folder_id: i64,
     },
     Compose,
+    FocusSearch,
+    SearchMode {
+        enabled: bool,
+    },
     Reply,
     ReplyAll,
     Forward,
@@ -174,6 +183,7 @@ impl SimpleComponent for Window {
                         set_tag: Some("mailbox"),
 
                         #[wrap(Some)]
+                        #[name(mailbox_toolbar)]
                         set_child = &adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
                                 #[name(show_sidebar_button)]
@@ -188,6 +198,12 @@ impl SimpleComponent for Window {
                                     set_tooltip_text: Some("New Message"),
                                     connect_clicked[sender] => move |_| sender.input(WindowMsg::Compose),
                                 },
+
+                                #[name(search_button)]
+                                pack_end = &gtk::ToggleButton {
+                                    set_icon_name: "system-search-symbolic",
+                                    set_tooltip_text: Some("Search mail"),
+                                },
                             },
 
                             #[wrap(Some)]
@@ -200,6 +216,13 @@ impl SimpleComponent for Window {
                                 message_list -> adw::ViewStack {
                                     set_vexpand: true,
                                     set_hexpand: true,
+                                },
+
+                                #[local_ref]
+                                search_view_widget -> adw::ViewStack {
+                                    set_vexpand: true,
+                                    set_hexpand: true,
+                                    set_visible: false,
                                 },
                             },
                         },
@@ -314,6 +337,14 @@ impl SimpleComponent for Window {
                         WindowMsg::MessageSelected { folder_id, uid }
                     }
                 });
+        let search_view =
+            SearchView::builder()
+                .launch(store.clone())
+                .forward(sender.input_sender(), |msg| match msg {
+                    SearchOutput::Selected { folder_id, uid } => {
+                        WindowMsg::MessageSelected { folder_id, uid }
+                    }
+                });
         let conversation =
             Conversation::builder()
                 .launch(store.clone())
@@ -355,10 +386,14 @@ impl SimpleComponent for Window {
             window: root.clone(),
             folder_tree,
             message_list,
+            search_view,
             conversation,
             sync_service,
             split_view: None,
             toast_overlay: None,
+            search_bar: None,
+            search_entry: None,
+            searching: false,
             mailbox_page_title: "Inbox".to_string(),
             selected_folder_id: None,
             anchor: None,
@@ -372,10 +407,39 @@ impl SimpleComponent for Window {
 
         let folder_tree = model.folder_tree.widget();
         let message_list = model.message_list.widget();
+        let search_view_widget = model.search_view.widget();
         let conversation = model.conversation.widget();
         let widgets = view_output!();
         model.split_view = Some(widgets.inner_view.clone());
         model.toast_overlay = Some(widgets.toast_overlay.clone());
+
+        let search_entry = gtk::SearchEntry::new();
+        let search_bar = gtk::SearchBar::builder().child(&search_entry).build();
+        widgets.mailbox_toolbar.add_top_bar(&search_bar);
+        widgets
+            .search_button
+            .bind_property("active", &search_bar, "search-mode-enabled")
+            .bidirectional()
+            .sync_create()
+            .build();
+        search_bar.connect_search_mode_enabled_notify({
+            let search_sender = sender.clone();
+            move |bar| {
+                search_sender.input(WindowMsg::SearchMode {
+                    enabled: bar.is_search_mode(),
+                });
+            }
+        });
+        search_entry.connect_search_changed({
+            let search_sender = model.search_view.sender().clone();
+            move |entry| {
+                search_sender.emit(SearchMsg::Search {
+                    query: entry.text().to_string(),
+                });
+            }
+        });
+        model.search_bar = Some(search_bar);
+        model.search_entry = Some(search_entry);
 
         let menu = gio::Menu::new();
         menu.append_item(&gio::MenuItem::new(
@@ -552,6 +616,24 @@ impl SimpleComponent for Window {
                     self.open_composer(None, &sender);
                 }
             }
+            WindowMsg::FocusSearch => {
+                if let Some(bar) = &self.search_bar {
+                    bar.set_search_mode(true);
+                }
+                if let Some(entry) = &self.search_entry {
+                    entry.grab_focus();
+                }
+            }
+            WindowMsg::SearchMode { enabled } => {
+                self.searching = enabled;
+                if enabled {
+                    if let Some(split_view) = &self.split_view {
+                        split_view.set_show_content(false);
+                    }
+                } else {
+                    self.search_view.emit(SearchMsg::Clear);
+                }
+            }
             WindowMsg::Reply => self.start_reply(ReplyMode::Reply, &sender),
             WindowMsg::ReplyAll => self.start_reply(ReplyMode::ReplyAll, &sender),
             WindowMsg::Forward => self.start_reply(ReplyMode::Forward, &sender),
@@ -633,6 +715,8 @@ impl SimpleComponent for Window {
             })
         });
         edit_draft_button.set_visible(drafts);
+        self.message_list.widget().set_visible(!self.searching);
+        self.search_view.widget().set_visible(self.searching);
         reply_button.set_sensitive(enabled);
         reply_all_button.set_sensitive(enabled);
         forward_button.set_sensitive(enabled);
