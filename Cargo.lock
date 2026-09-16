@@ -60,6 +60,7 @@ dependencies = [
  "base64 0.22.1",
  "mail-core",
  "relm4",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

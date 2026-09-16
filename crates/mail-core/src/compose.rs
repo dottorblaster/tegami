@@ -12,7 +12,7 @@
 use mail_builder::MessageBuilder;
 use mail_builder::headers::message_id::MessageId;
 use mail_builder::mime::MimePart;
-use mail_parser::{Address as ParsedAddress, MessageParser};
+use mail_parser::{Address as ParsedAddress, DateTime, Message, MessageParser};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Address {
@@ -158,6 +158,253 @@ pub fn build(message: &OutgoingMessage) -> Result<Vec<u8>, ComposeError> {
     }
 
     Ok(builder.body(body(message)).write_to_vec()?)
+}
+
+/// The shape of a reply or forward built from an existing message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyMode {
+    Reply,
+    ReplyAll,
+    Forward,
+}
+
+/// Builds a reply, a reply-all or a forward from the raw bytes of the
+/// original message. The `from` field stays empty: the sender identity is
+/// chosen by the composer. `me` is the identity used to exclude ourselves
+/// from the recipients of a reply-all.
+///
+/// Returns [`None`] when the raw message cannot be parsed at all.
+pub fn reply(raw: &[u8], me: Option<&Address>, mode: ReplyMode) -> Option<OutgoingMessage> {
+    let message = MessageParser::default().parse(raw)?;
+    let subject = strip_prefixes(message.subject().unwrap_or(""));
+    let message_id: Option<String> = message
+        .message_id()
+        .map(trim_message_id)
+        .map(str::to_string);
+    let mut references: Vec<String> = message
+        .references()
+        .as_text_list()
+        .map(|list| {
+            list.iter()
+                .map(|id| trim_message_id(id).to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    if let Some(id) = &message_id
+        && !references.contains(id)
+    {
+        references.push(id.clone());
+    }
+    let date = message.date();
+    let text = message.body_text(0).map(|body| body.into_owned());
+    match mode {
+        ReplyMode::Forward => forward(raw, &message, &subject),
+        ReplyMode::Reply | ReplyMode::ReplyAll => {
+            let senders = message.from().map(parsed_addresses).unwrap_or_default();
+            let to = reply_recipients(&message);
+            let cc = if mode == ReplyMode::ReplyAll {
+                reply_all_cc(&message, &to, &senders, me)
+            } else {
+                Vec::new()
+            };
+            let quoted = text
+                .as_deref()
+                .map(|body| quoted_body(body, &sender_label(&senders), date))
+                .unwrap_or_else(|| attribution(&sender_label(&senders), date));
+            Some(OutgoingMessage {
+                from: None,
+                to,
+                cc,
+                bcc: Vec::new(),
+                subject: format!("Re: {subject}").trim().to_string(),
+                text: Some(quoted),
+                html: None,
+                attachments: Vec::new(),
+                inline: Vec::new(),
+                in_reply_to: message_id,
+                references,
+            })
+        }
+    }
+}
+
+fn forward(raw: &[u8], message: &Message<'_>, subject: &str) -> Option<OutgoingMessage> {
+    let parsed = crate::mime::parse(raw)?;
+    let mut body = forwarded_header(message);
+    if let Some(text) = parsed.text.filter(|text| !text.trim().is_empty()) {
+        body.push('\n');
+        body.push('\n');
+        body.push_str(text.trim_end());
+    }
+    Some(OutgoingMessage {
+        from: None,
+        to: Vec::new(),
+        cc: Vec::new(),
+        bcc: Vec::new(),
+        subject: format!("Fwd: {subject}").trim().to_string(),
+        text: Some(body),
+        html: None,
+        attachments: forwarded_attachments(&parsed.attachments),
+        inline: Vec::new(),
+        in_reply_to: None,
+        references: Vec::new(),
+    })
+}
+
+/// The recipients a reply is addressed to, honoring a `Reply-To` header.
+fn reply_recipients(message: &Message<'_>) -> Vec<Address> {
+    match message.reply_to() {
+        Some(reply_to) => parsed_addresses(reply_to),
+        None => message.from().map(parsed_addresses).unwrap_or_default(),
+    }
+}
+
+fn reply_all_cc(
+    message: &Message<'_>,
+    to: &[Address],
+    senders: &[Address],
+    me: Option<&Address>,
+) -> Vec<Address> {
+    let mut cc = Vec::new();
+    for header in [message.to(), message.cc()].into_iter().flatten() {
+        cc.extend(parsed_addresses(header));
+    }
+    cc.retain(|address| {
+        !is_me(address, me)
+            && !contains_email(to, &address.email)
+            && !contains_email(senders, &address.email)
+    });
+    dedupe(cc)
+}
+
+fn contains_email(addresses: &[Address], email: &str) -> bool {
+    addresses
+        .iter()
+        .any(|address| address.email.eq_ignore_ascii_case(email))
+}
+
+fn is_me(address: &Address, me: Option<&Address>) -> bool {
+    me.is_some_and(|identity| address.email.eq_ignore_ascii_case(&identity.email))
+}
+
+fn dedupe(addresses: Vec<Address>) -> Vec<Address> {
+    let mut seen = Vec::new();
+    addresses
+        .into_iter()
+        .filter(|address| {
+            if seen
+                .iter()
+                .any(|seen: &String| seen.eq_ignore_ascii_case(&address.email))
+            {
+                false
+            } else {
+                seen.push(address.email.clone());
+                true
+            }
+        })
+        .collect()
+}
+
+fn forwarded_header(message: &Message<'_>) -> String {
+    let mut lines = vec!["---------- Forwarded message ----------".to_string()];
+    if let Some(from) = message.from().map(display_list) {
+        lines.push(format!("From: {from}"));
+    }
+    if let Some(date) = message.date() {
+        lines.push(format!("Date: {date}"));
+    }
+    if let Some(subject) = message
+        .subject()
+        .map(str::trim)
+        .filter(|subject| !subject.is_empty())
+    {
+        lines.push(format!("Subject: {subject}"));
+    }
+    if let Some(to) = message.to().map(display_list) {
+        lines.push(format!("To: {to}"));
+    }
+    lines.join("\n")
+}
+
+fn forwarded_attachments(attachments: &[crate::mime::Attachment]) -> Vec<OutgoingAttachment> {
+    attachments
+        .iter()
+        .filter(|attachment| {
+            !(attachment.content_id.is_some() && attachment.mime_type.starts_with("image/"))
+        })
+        .map(|attachment| OutgoingAttachment {
+            filename: attachment.filename.clone().unwrap_or_default(),
+            mime_type: attachment.mime_type.clone(),
+            data: attachment.data.clone(),
+        })
+        .collect()
+}
+
+fn display_list(address: &ParsedAddress<'_>) -> String {
+    parsed_addresses(address)
+        .iter()
+        .map(display_address)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn display_address(address: &Address) -> String {
+    match &address.name {
+        Some(name) if !name.trim().is_empty() => {
+            format!("{} <{}>", name.trim(), address.email)
+        }
+        _ => address.email.clone(),
+    }
+}
+
+fn sender_label(senders: &[Address]) -> String {
+    match senders.first() {
+        Some(address) => display_address(address),
+        None => "(unknown sender)".to_string(),
+    }
+}
+
+fn attribution(sender: &str, date: Option<&DateTime>) -> String {
+    match date {
+        Some(date) => format!("On {date}, {sender} wrote:\n"),
+        None => format!("{sender} wrote:\n"),
+    }
+}
+
+fn quoted_body(text: &str, sender: &str, date: Option<&DateTime>) -> String {
+    let mut quoted = attribution(sender, date);
+    for line in text.lines() {
+        quoted.push_str("> ");
+        quoted.push_str(line);
+        quoted.push('\n');
+    }
+    quoted
+}
+
+/// Strips repeated `Re:`/`Fwd:`/`Fw:` prefixes (case-insensitive).
+fn strip_prefixes(subject: &str) -> String {
+    let mut rest = subject.trim();
+    while let Some(end) = prefix_end(rest) {
+        rest = rest[end..]
+            .trim_start()
+            .trim_start_matches(':')
+            .trim_start();
+    }
+    rest.to_string()
+}
+
+fn prefix_end(subject: &str) -> Option<usize> {
+    let lower = subject.to_ascii_lowercase();
+    for (word, length) in [("re", 2usize), ("fw", 2), ("fwd", 3)] {
+        if lower.starts_with(word) {
+            let after = &subject[length..];
+            if after.is_empty() || after.starts_with(':') || after.starts_with(char::is_whitespace)
+            {
+                return Some(length);
+            }
+        }
+    }
+    None
 }
 
 fn trim_message_id(value: &str) -> &str {
@@ -421,6 +668,166 @@ mod tests {
         assert_eq!(
             parsed.attachment(0).unwrap().attachment_name(),
             Some("notes.txt")
+        );
+    }
+
+    const ORIGINAL: &str = concat!(
+        "From: Ada Lovelace <ada@lovelace.dev>\r\n",
+        "To: grace@navy.dev\r\n",
+        "Cc: cc@example.org\r\n",
+        "Subject: Re: Greetings\r\n",
+        "Date: Mon, 03 Mar 2025 10:20:30 +0000\r\n",
+        "Message-ID: <abc123@lovelace.dev>\r\n",
+        "References: <first@example.org>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: text/plain; charset=\"utf-8\"\r\n",
+        "\r\n",
+        "Hello there\r\n",
+        "Second line\r\n",
+    );
+
+    #[test]
+    fn builds_a_reply_with_quote_and_threading_headers() {
+        let replied = reply(ORIGINAL.as_bytes(), None, ReplyMode::Reply).unwrap();
+
+        assert_eq!(replied.to.len(), 1);
+        assert_eq!(replied.to[0].email, "ada@lovelace.dev");
+        assert!(replied.cc.is_empty());
+        assert_eq!(replied.subject, "Re: Greetings");
+        assert_eq!(replied.in_reply_to.as_deref(), Some("abc123@lovelace.dev"));
+        assert_eq!(
+            replied.references,
+            vec!["first@example.org", "abc123@lovelace.dev"]
+        );
+        assert_eq!(
+            replied.text.as_deref(),
+            Some(
+                "On 2025-03-03T10:20:30Z, Ada Lovelace <ada@lovelace.dev> wrote:\n> Hello there\n> Second line\n"
+            )
+        );
+    }
+
+    #[test]
+    fn reply_all_adds_the_original_recipients_minus_myself() {
+        let me = Address::new(Some("Me".to_string()), "grace@navy.dev");
+        let replied = reply(ORIGINAL.as_bytes(), Some(&me), ReplyMode::ReplyAll).unwrap();
+
+        assert_eq!(replied.to.len(), 1);
+        assert_eq!(replied.to[0].email, "ada@lovelace.dev");
+        assert_eq!(replied.cc.len(), 1);
+        assert_eq!(replied.cc[0].email, "cc@example.org");
+
+        // Myself (in To) and the original sender are never cc'd.
+        let replied = reply(
+            "From: ada@lovelace.dev\r\nTo: grace@navy.dev, other@example.org\r\nCc: cc@example.org\r\nSubject: hi\r\n\r\nbody\r\n".as_bytes(),
+            Some(&me),
+            ReplyMode::ReplyAll,
+        )
+        .unwrap();
+        assert_eq!(replied.to.len(), 1);
+        assert_eq!(replied.to[0].email, "ada@lovelace.dev");
+        let cc: Vec<&str> = replied.cc.iter().map(|a| a.email.as_str()).collect();
+        assert_eq!(cc, vec!["other@example.org", "cc@example.org"]);
+    }
+
+    #[test]
+    fn reply_honors_the_reply_to_header() {
+        let raw = "From: ada@lovelace.dev\r\nReply-To: support@example.org\r\nSubject: hi\r\n\r\nbody\r\n";
+        let replied = reply(raw.as_bytes(), None, ReplyMode::Reply).unwrap();
+        assert_eq!(replied.to.len(), 1);
+        assert_eq!(replied.to[0].email, "support@example.org");
+    }
+
+    #[test]
+    fn builds_a_forward_with_header_block_and_attachments() {
+        let raw = concat!(
+            "From: Ada Lovelace <ada@lovelace.dev>\r\n",
+            "To: grace@navy.dev\r\n",
+            "Subject: Report\r\n",
+            "Date: Mon, 03 Mar 2025 10:20:30 +0000\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/mixed; boundary=\"BOUND\"\r\n",
+            "\r\n",
+            "--BOUND\r\n",
+            "Content-Type: text/plain; charset=\"utf-8\"\r\n",
+            "\r\n",
+            "Please review\r\n",
+            "--BOUND\r\n",
+            "Content-Type: application/pdf; name=\"doc.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"doc.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "SGVsbG8=\r\n",
+            "--BOUND--\r\n",
+        );
+        let forwarded = reply(raw.as_bytes(), None, ReplyMode::Forward).unwrap();
+
+        assert_eq!(forwarded.subject, "Fwd: Report");
+        assert!(forwarded.in_reply_to.is_none());
+        assert!(forwarded.references.is_empty());
+        assert_eq!(forwarded.to.len(), 0);
+        let body = forwarded.text.as_deref().unwrap();
+        assert!(body.contains("---------- Forwarded message ----------"));
+        assert!(body.contains("From: Ada Lovelace <ada@lovelace.dev>"));
+        assert!(body.contains("To: grace@navy.dev"));
+        assert!(body.contains("Please review"));
+        assert_eq!(forwarded.attachments.len(), 1);
+        assert_eq!(forwarded.attachments[0].filename, "doc.pdf");
+        assert_eq!(forwarded.attachments[0].mime_type, "application/pdf");
+        assert_eq!(forwarded.attachments[0].data, b"Hello");
+    }
+
+    #[test]
+    fn forward_skips_inline_images() {
+        let raw = concat!(
+            "From: a@example.org\r\n",
+            "Subject: inline\r\n",
+            "MIME-Version: 1.0\r\n",
+            "Content-Type: multipart/related; boundary=\"REL\"\r\n",
+            "\r\n",
+            "--REL\r\n",
+            "Content-Type: text/html; charset=\"utf-8\"\r\n",
+            "\r\n",
+            "<p><img src=\"cid:logo@example.org\"></p>\r\n",
+            "--REL\r\n",
+            "Content-Type: image/png\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "Content-ID: <logo@example.org>\r\n",
+            "\r\n",
+            "aGk=\r\n",
+            "--REL--\r\n",
+        );
+        let forwarded = reply(raw.as_bytes(), None, ReplyMode::Forward).unwrap();
+        assert!(forwarded.attachments.is_empty());
+        assert!(
+            forwarded
+                .text
+                .as_deref()
+                .unwrap()
+                .contains("---------- Forwarded message ----------")
+        );
+    }
+
+    #[test]
+    fn subject_prefixes_are_stripped_and_readded() {
+        assert_eq!(strip_prefixes("Re: Hello"), "Hello");
+        assert_eq!(strip_prefixes("Re: Re: Hello"), "Hello");
+        assert_eq!(strip_prefixes("FW: Hello"), "Hello");
+        assert_eq!(strip_prefixes("fwd: Hello"), "Hello");
+        assert_eq!(strip_prefixes("Hello"), "Hello");
+        assert_eq!(strip_prefixes("Remark"), "Remark");
+        let replied = reply(ORIGINAL.as_bytes(), None, ReplyMode::Reply).unwrap();
+        assert_eq!(replied.subject, "Re: Greetings");
+    }
+
+    #[test]
+    fn html_only_messages_quote_the_extracted_text() {
+        let raw =
+            "From: a@example.org\r\nSubject: hi\r\nContent-Type: text/html\r\n\r\n<p>hi</p>\r\n";
+        let replied = reply(raw.as_bytes(), None, ReplyMode::Reply).unwrap();
+        assert_eq!(
+            replied.text.as_deref(),
+            Some("a@example.org wrote:\n> hi\n")
         );
     }
 }

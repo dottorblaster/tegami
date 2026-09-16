@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use mail_core::compose::{self, Address, OutgoingMessage};
+use mail_core::compose::{self, Address, OutgoingAttachment, OutgoingMessage};
 use mail_core::store::{AccountRecord, Store};
 use relm4::adw;
 use relm4::gtk::prelude::*;
@@ -42,8 +42,17 @@ pub struct MessageDraft {
     pub bcc: String,
     pub subject: String,
     pub body: String,
+    pub attachments: Vec<OutgoingAttachment>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
 }
 
+/// Everything the composer needs to start: the store for identities and an
+/// optional prefilled draft (reply, reply-all or forward).
+pub struct ComposerInit {
+    pub store: Arc<Store>,
+    pub initial: Option<MessageDraft>,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComposerOutput {
     Send(MessageDraft),
@@ -89,6 +98,9 @@ pub fn draft(
         bcc: bcc.trim().to_string(),
         subject: subject.trim().to_string(),
         body: body.to_string(),
+        attachments: Vec::new(),
+        in_reply_to: None,
+        references: Vec::new(),
     }
 }
 
@@ -100,7 +112,32 @@ pub fn outgoing(draft: &MessageDraft) -> OutgoingMessage {
         bcc: compose::parse_addresses(&draft.bcc),
         subject: draft.subject.clone(),
         text: Some(draft.body.clone()),
+        attachments: draft.attachments.clone(),
+        in_reply_to: draft.in_reply_to.clone(),
+        references: draft.references.clone(),
         ..OutgoingMessage::default()
+    }
+}
+
+pub(crate) fn render_addresses(addresses: &[Address]) -> String {
+    addresses
+        .iter()
+        .map(render_address)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_address(address: &Address) -> String {
+    match &address.name {
+        Some(name) if !name.trim().is_empty() => {
+            let name = name.trim();
+            if name.contains(',') || name.contains(';') || name.contains('"') {
+                format!("\"{name}\" <{}>", address.email)
+            } else {
+                format!("{name} <{}>", address.email)
+            }
+        }
+        _ => address.email.clone(),
     }
 }
 
@@ -124,7 +161,17 @@ pub struct Composer {
     bcc: String,
     subject: String,
     cc_visible: bool,
+    attachments: Vec<OutgoingAttachment>,
+    in_reply_to: Option<String>,
+    references: Vec<String>,
+    pending: Option<MessageDraft>,
+    to_entry: Option<gtk::Entry>,
+    cc_entry: Option<gtk::Entry>,
+    bcc_entry: Option<gtk::Entry>,
+    subject_entry: Option<gtk::Entry>,
+    identity_dropdown: Option<gtk::DropDown>,
     body_view: Option<gtk::TextView>,
+    attachments_slot: Option<gtk::Box>,
     toast_overlay: Option<adw::ToastOverlay>,
 }
 
@@ -142,7 +189,7 @@ pub enum ComposerMsg {
 
 #[relm4::component(pub)]
 impl SimpleComponent for Composer {
-    type Init = Arc<Store>;
+    type Init = ComposerInit;
     type Input = ComposerMsg;
     type Output = ComposerOutput;
 
@@ -212,6 +259,7 @@ impl SimpleComponent for Composer {
                                     add_css_class: "dim-label",
                                 },
 
+                                #[name(to_entry)]
                                 gtk::Entry {
                                     set_hexpand: true,
                                     set_placeholder_text: Some("name@example.org"),
@@ -234,6 +282,7 @@ impl SimpleComponent for Composer {
                                     add_css_class: "dim-label",
                                 },
 
+                                #[name(cc_entry)]
                                 gtk::Entry {
                                     set_hexpand: true,
                                     connect_changed[sender] => move |entry| {
@@ -255,6 +304,7 @@ impl SimpleComponent for Composer {
                                     add_css_class: "dim-label",
                                 },
 
+                                #[name(bcc_entry)]
                                 gtk::Entry {
                                     set_hexpand: true,
                                     connect_changed[sender] => move |entry| {
@@ -274,6 +324,7 @@ impl SimpleComponent for Composer {
                                     add_css_class: "dim-label",
                                 },
 
+                                #[name(subject_entry)]
                                 gtk::Entry {
                                     set_hexpand: true,
                                     connect_changed[sender] => move |entry| {
@@ -288,6 +339,15 @@ impl SimpleComponent for Composer {
                                 add_css_class: "flat",
                                 add_css_class: "composer-cc-toggle",
                                 connect_clicked[sender] => move |_| sender.input(ComposerMsg::ToggleCc),
+                            },
+
+                            #[name(attachments_slot)]
+                            gtk::Box {
+                                set_orientation: gtk::Orientation::Vertical,
+                                set_spacing: 2,
+                                add_css_class: "composer-attachments",
+                                #[watch]
+                                set_visible: !model.attachments.is_empty(),
                             },
                         },
 
@@ -314,12 +374,12 @@ impl SimpleComponent for Composer {
     }
 
     fn init(
-        store: Self::Init,
+        init: Self::Init,
         _root: Self::Root,
         sender: ComponentSender<Self>,
     ) -> ComponentParts<Self> {
         let mut model = Composer {
-            store,
+            store: init.store,
             identity_labels: gtk::StringList::new(&[]),
             identities: Vec::new(),
             selected_identity: 0,
@@ -328,11 +388,27 @@ impl SimpleComponent for Composer {
             bcc: String::new(),
             subject: String::new(),
             cc_visible: false,
+            attachments: Vec::new(),
+            in_reply_to: None,
+            references: Vec::new(),
+            pending: init.initial,
+            to_entry: None,
+            cc_entry: None,
+            bcc_entry: None,
+            subject_entry: None,
+            identity_dropdown: None,
             body_view: None,
+            attachments_slot: None,
             toast_overlay: None,
         };
         let widgets = view_output!();
+        model.to_entry = Some(widgets.to_entry.clone());
+        model.cc_entry = Some(widgets.cc_entry.clone());
+        model.bcc_entry = Some(widgets.bcc_entry.clone());
+        model.subject_entry = Some(widgets.subject_entry.clone());
+        model.identity_dropdown = Some(widgets.identity_dropdown.clone());
         model.body_view = Some(widgets.body_view.clone());
+        model.attachments_slot = Some(widgets.attachments_slot.clone());
         model.toast_overlay = Some(widgets.toast_overlay.clone());
 
         let store = model.store.clone();
@@ -360,6 +436,9 @@ impl SimpleComponent for Composer {
                     .splice(0, self.identity_labels.n_items(), &labels);
                 self.identities = identities;
                 self.selected_identity = 0;
+                if let Some(draft) = self.pending.take() {
+                    self.apply_draft(draft);
+                }
             }
             ComposerMsg::IdentitySelected(index) => self.selected_identity = index as usize,
             ComposerMsg::ToChanged(value) => self.to = value,
@@ -372,7 +451,7 @@ impl SimpleComponent for Composer {
                 if !can_send(identity.as_ref(), &self.to) {
                     return;
                 }
-                let draft = draft(
+                let mut draft = draft(
                     identity,
                     &self.to,
                     &self.cc,
@@ -380,6 +459,9 @@ impl SimpleComponent for Composer {
                     &self.subject,
                     &self.body(),
                 );
+                draft.attachments = self.attachments.clone();
+                draft.in_reply_to = self.in_reply_to.clone();
+                draft.references = self.references.clone();
                 let _ = sender.output(ComposerOutput::Send(draft));
             }
         }
@@ -389,6 +471,61 @@ impl SimpleComponent for Composer {
 impl Composer {
     fn identity(&self) -> Option<Identity> {
         self.identities.get(self.selected_identity).cloned()
+    }
+
+    fn apply_draft(&mut self, draft: MessageDraft) {
+        self.to = draft.to.clone();
+        self.cc = draft.cc.clone();
+        self.bcc = draft.bcc.clone();
+        self.subject = draft.subject.clone();
+        self.cc_visible = !draft.cc.is_empty() || !draft.bcc.is_empty();
+        self.attachments = draft.attachments.clone();
+        self.in_reply_to = draft.in_reply_to.clone();
+        self.references = draft.references.clone();
+
+        if let Some(entry) = &self.to_entry {
+            entry.set_text(&draft.to);
+        }
+        if let Some(entry) = &self.cc_entry {
+            entry.set_text(&draft.cc);
+        }
+        if let Some(entry) = &self.bcc_entry {
+            entry.set_text(&draft.bcc);
+        }
+        if let Some(entry) = &self.subject_entry {
+            entry.set_text(&draft.subject);
+        }
+        if let Some(view) = &self.body_view {
+            view.buffer().set_text(&draft.body);
+        }
+
+        if let Some(index) = draft.identity.as_ref().and_then(|identity| {
+            self.identities
+                .iter()
+                .position(|known| known.account_id == identity.account_id)
+        }) {
+            self.selected_identity = index;
+            if let Some(dropdown) = &self.identity_dropdown {
+                dropdown.set_selected(index as u32);
+            }
+        }
+
+        self.sync_attachments();
+    }
+
+    fn sync_attachments(&mut self) {
+        let Some(slot) = &self.attachments_slot else {
+            return;
+        };
+        while let Some(child) = slot.first_child() {
+            slot.remove(&child);
+        }
+        for attachment in &self.attachments {
+            let label = gtk::Label::new(Some(&attachment.filename));
+            label.set_xalign(0.0);
+            label.add_css_class("dim-label");
+            slot.append(&label);
+        }
     }
 
     fn body(&self) -> String {

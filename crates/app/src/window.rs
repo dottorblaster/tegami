@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::sync::Arc;
 
 use gtk::gio;
+use mail_core::compose::ReplyMode;
 use mail_core::envelope::FlagChange;
 use mail_core::store::{FLAG_FLAGGED, FLAG_SEEN, FolderRecord, SpecialUse, Store};
 use relm4::MessageBroker;
@@ -15,7 +16,7 @@ use relm4::prelude::*;
 use tracing::{debug, warn};
 
 use crate::application::{About, Quit};
-use crate::composer::{self, Composer, ComposerOutput};
+use crate::composer::{self, Composer, ComposerInit, ComposerOutput, MessageDraft};
 use crate::config;
 use crate::conversation::{AnchorState, Conversation, ConversationMsg, ConversationOutput};
 use crate::message_list::{MessageList, MessageListMsg, MessageListOutput};
@@ -97,6 +98,10 @@ pub enum WindowMsg {
         target_folder_id: i64,
     },
     Compose,
+    Reply,
+    ReplyAll,
+    Forward,
+    ReplyDraft(MessageDraft),
     DraftReady(composer::MessageDraft),
     SendResult {
         sent: bool,
@@ -201,6 +206,30 @@ impl SimpleComponent for Window {
                         #[wrap(Some)]
                         set_child = &adw::ToolbarView {
                             add_top_bar = &adw::HeaderBar {
+                                #[name(reply_button)]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "mail-reply-sender-symbolic",
+                                    set_tooltip_text: Some("Reply"),
+                                    set_sensitive: false,
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::Reply),
+                                },
+
+                                #[name(reply_all_button)]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "mail-reply-all-symbolic",
+                                    set_tooltip_text: Some("Reply to all"),
+                                    set_sensitive: false,
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::ReplyAll),
+                                },
+
+                                #[name(forward_button)]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "mail-forward-symbolic",
+                                    set_tooltip_text: Some("Forward"),
+                                    set_sensitive: false,
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::Forward),
+                                },
+
                                 #[name(flag_button)]
                                 pack_start = &gtk::Button {
                                     set_icon_name: "non-starred-symbolic",
@@ -501,8 +530,14 @@ impl SimpleComponent for Window {
                 {
                     composer.widget().present();
                 } else {
-                    self.open_composer(&sender);
+                    self.open_composer(None, &sender);
                 }
+            }
+            WindowMsg::Reply => self.start_reply(ReplyMode::Reply, &sender),
+            WindowMsg::ReplyAll => self.start_reply(ReplyMode::ReplyAll, &sender),
+            WindowMsg::Forward => self.start_reply(ReplyMode::Forward, &sender),
+            WindowMsg::ReplyDraft(draft) => {
+                self.open_composer(Some(draft), &sender);
             }
             WindowMsg::DraftReady(draft) => {
                 let Some(account_id) = draft.identity.as_ref().map(|identity| identity.account_id)
@@ -542,6 +577,9 @@ impl SimpleComponent for Window {
     fn post_view(&self, _widgets: &mut Self::Widgets) {
         let enabled = self.anchor.is_some();
         let flagged = self.anchor.as_ref().is_some_and(|anchor| anchor.flagged);
+        reply_button.set_sensitive(enabled);
+        reply_all_button.set_sensitive(enabled);
+        forward_button.set_sensitive(enabled);
         flag_button.set_sensitive(enabled);
         delete_button.set_sensitive(enabled);
         move_button.set_sensitive(enabled);
@@ -565,15 +603,32 @@ impl SimpleComponent for Window {
 }
 
 impl Window {
-    fn open_composer(&mut self, sender: &ComponentSender<Self>) {
+    fn open_composer(&mut self, initial: Option<MessageDraft>, sender: &ComponentSender<Self>) {
         let builder = Composer::builder();
         relm4::main_application().add_window(&builder.root);
         let composer = builder
-            .launch(self.store.clone())
+            .launch(ComposerInit {
+                store: self.store.clone(),
+                initial,
+            })
             .forward(sender.input_sender(), |msg| match msg {
                 ComposerOutput::Send(draft) => WindowMsg::DraftReady(draft),
             });
         self.composer = Some(composer);
+    }
+
+    fn start_reply(&self, mode: ReplyMode, sender: &ComponentSender<Self>) {
+        let Some(anchor) = self.anchor.clone() else {
+            return;
+        };
+        let store = self.store.clone();
+        let reply_sender = sender.clone();
+        sender.oneshot_command(async move {
+            match reply_draft(&store, anchor.folder_id, anchor.uid, mode).await {
+                Ok(draft) => reply_sender.input(WindowMsg::ReplyDraft(draft)),
+                Err(detail) => debug!(detail, "cannot compose reply"),
+            }
+        });
     }
 
     fn rebuild_move_menu(&mut self, sender: &ComponentSender<Self>) {
@@ -725,6 +780,60 @@ fn folder_title(folder: &FolderRecord) -> String {
         .unwrap_or_else(|| folder.name.clone())
 }
 
+async fn reply_draft(
+    store: &Store,
+    folder_id: i64,
+    uid: u32,
+    mode: ReplyMode,
+) -> Result<MessageDraft, String> {
+    let message = store
+        .message(folder_id, uid)
+        .await
+        .map_err(|err| err.to_string())?
+        .ok_or_else(|| "message not found".to_string())?;
+    let raw_path = message
+        .raw_path
+        .as_deref()
+        .ok_or_else(|| "message body is not cached".to_string())?;
+    let raw = tokio::fs::read(raw_path)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let account_id = store
+        .folder(folder_id)
+        .await
+        .map_err(|err| err.to_string())?
+        .map(|folder| folder.account_id);
+    let accounts = store.accounts().await.map_err(|err| err.to_string())?;
+    let identity = account_id.and_then(|account_id| {
+        accounts
+            .into_iter()
+            .find(|account| account.id == Some(account_id))
+    });
+    let identity = identity.map(|account| composer::Identity {
+        account_id: account.id.unwrap_or_default(),
+        name: account.display_name.clone().unwrap_or_default(),
+        email: account.email.clone(),
+    });
+    let me = identity.as_ref().map(|identity| {
+        mail_core::compose::Address::new(Some(identity.name.clone()), identity.email.clone())
+    });
+
+    let outgoing = mail_core::compose::reply(&raw, me.as_ref(), mode)
+        .ok_or_else(|| "cannot parse the message".to_string())?;
+    Ok(MessageDraft {
+        identity,
+        to: composer::render_addresses(&outgoing.to),
+        cc: composer::render_addresses(&outgoing.cc),
+        bcc: composer::render_addresses(&outgoing.bcc),
+        subject: outgoing.subject,
+        body: outgoing.text.unwrap_or_default(),
+        attachments: outgoing.attachments,
+        in_reply_to: outgoing.in_reply_to,
+        references: outgoing.references,
+    })
+}
+
 fn collapse_breakpoint(max_width: f64, widget: &impl IsA<glib::Object>) -> adw::Breakpoint {
     let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
         adw::BreakpointConditionLengthType::MaxWidth,
@@ -733,4 +842,181 @@ fn collapse_breakpoint(max_width: f64, widget: &impl IsA<glib::Object>) -> adw::
     ));
     breakpoint.add_setter(widget, "collapsed", Some(&true.to_value()));
     breakpoint
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mail_core::compose::OutgoingMessage;
+    use mail_core::store::{
+        AccountRecord, AccountSource, AuthKind, BodyState, FolderRecord, MessageRecord, SpecialUse,
+    };
+    use tempfile::TempDir;
+
+    const RAW: &str = concat!(
+        "From: Ada Lovelace <ada@lovelace.dev>\r\n",
+        "To: grace@navy.dev\r\n",
+        "Subject: Re: Greetings\r\n",
+        "Date: Mon, 03 Mar 2025 10:20:30 +0000\r\n",
+        "Message-ID: <abc123@lovelace.dev>\r\n",
+        "\r\n",
+        "Hello there\r\n",
+    );
+
+    fn account() -> AccountRecord {
+        AccountRecord {
+            id: None,
+            source: AccountSource::Goa,
+            external_id: "account_1".to_string(),
+            email: "user@example.org".to_string(),
+            display_name: Some("Example User".to_string()),
+            imap_host: None,
+            imap_port: None,
+            imap_security: None,
+            smtp_host: None,
+            smtp_port: None,
+            smtp_security: None,
+            auth_kind: AuthKind::Password,
+            username: None,
+        }
+    }
+
+    fn folder(account_id: i64) -> FolderRecord {
+        FolderRecord {
+            id: None,
+            account_id,
+            name: "INBOX".to_string(),
+            display_name: Some("Inbox".to_string()),
+            special_use: Some(SpecialUse::Inbox),
+            uidvalidity: None,
+            uidnext: None,
+            highestmodseq: None,
+            unread_count: 0,
+            total_count: 0,
+            subscribed: true,
+        }
+    }
+
+    fn message(folder_id: i64, raw_path: &str) -> MessageRecord {
+        MessageRecord {
+            id: None,
+            folder_id,
+            uid: 7,
+            modseq: None,
+            message_id: Some("<abc123@lovelace.dev>".to_string()),
+            thread_id: None,
+            subject: "Re: Greetings".to_string(),
+            from_addr: Some("ada@lovelace.dev".to_string()),
+            from_name: Some("Ada Lovelace".to_string()),
+            to_addrs: None,
+            cc_addrs: None,
+            date_sent: Some(1741000000),
+            date_recv: None,
+            in_reply_to: None,
+            refs: None,
+            flags: 0,
+            has_attach: false,
+            size: None,
+            structure: None,
+            raw_path: Some(raw_path.to_string()),
+            body_state: BodyState::Full,
+        }
+    }
+
+    async fn seeded() -> (Store, TempDir) {
+        let store = Store::open(":memory:").unwrap();
+        let account_id = store.upsert_account(account()).await.unwrap();
+        let folder_id = store.upsert_folder(folder(account_id)).await.unwrap();
+        let dir = TempDir::new().unwrap();
+        let raw_path = dir.path().join("raw.eml").to_string_lossy().into_owned();
+        std::fs::write(&raw_path, RAW).unwrap();
+        store
+            .upsert_message(message(folder_id, &raw_path))
+            .await
+            .unwrap();
+        (store, dir)
+    }
+
+    #[tokio::test]
+    async fn reply_draft_builds_a_quoted_reply() {
+        let (store, _dir) = seeded().await;
+        let folder_id = store
+            .folders(store.accounts().await.unwrap()[0].id.unwrap())
+            .await
+            .unwrap()[0]
+            .id
+            .unwrap();
+        let draft = reply_draft(&store, folder_id, 7, ReplyMode::Reply)
+            .await
+            .unwrap();
+
+        assert_eq!(draft.to, "Ada Lovelace <ada@lovelace.dev>");
+        assert!(draft.cc.is_empty());
+        assert_eq!(draft.subject, "Re: Greetings");
+        assert_eq!(draft.in_reply_to.as_deref(), Some("abc123@lovelace.dev"));
+        assert!(draft.body.contains("> Hello there"));
+        assert_eq!(draft.identity.unwrap().email, "user@example.org");
+    }
+
+    #[tokio::test]
+    async fn reply_draft_requires_a_cached_body() {
+        let (store, _dir) = seeded().await;
+        let folder_id = store
+            .folders(store.accounts().await.unwrap()[0].id.unwrap())
+            .await
+            .unwrap()[0]
+            .id
+            .unwrap();
+        store
+            .set_message_body(folder_id, 7, String::new(), BodyState::None, false)
+            .await
+            .unwrap();
+
+        assert!(
+            reply_draft(&store, folder_id, 7, ReplyMode::Reply)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn draft_from_outgoing_carries_everything() {
+        let outgoing = OutgoingMessage {
+            from: None,
+            to: vec![mail_core::compose::Address::new(
+                Some("Ada Lovelace".to_string()),
+                "ada@lovelace.dev",
+            )],
+            cc: vec![mail_core::compose::Address::new(
+                Some("Hopper, G".to_string()),
+                "g@navy.dev",
+            )],
+            subject: "Re: hi".to_string(),
+            text: Some("> quoted".to_string()),
+            attachments: vec![mail_core::compose::OutgoingAttachment {
+                filename: "doc.pdf".to_string(),
+                mime_type: "application/pdf".to_string(),
+                data: b"%PDF".to_vec(),
+            }],
+            in_reply_to: Some("abc@example.org".to_string()),
+            references: vec!["abc@example.org".to_string()],
+            ..OutgoingMessage::default()
+        };
+        let draft = MessageDraft {
+            identity: None,
+            to: composer::render_addresses(&outgoing.to),
+            cc: composer::render_addresses(&outgoing.cc),
+            bcc: composer::render_addresses(&outgoing.bcc),
+            subject: outgoing.subject,
+            body: outgoing.text.unwrap_or_default(),
+            attachments: outgoing.attachments,
+            in_reply_to: outgoing.in_reply_to,
+            references: outgoing.references,
+        };
+        assert_eq!(draft.to, "Ada Lovelace <ada@lovelace.dev>");
+        assert_eq!(draft.cc, "\"Hopper, G\" <g@navy.dev>");
+        assert_eq!(draft.attachments.len(), 1);
+        assert_eq!(draft.in_reply_to.as_deref(), Some("abc@example.org"));
+        assert_eq!(draft.references, vec!["abc@example.org"]);
+    }
 }
