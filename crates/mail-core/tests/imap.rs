@@ -99,6 +99,20 @@ async fn inbox(store: &Store, account_id: i64) -> i64 {
         .unwrap()
 }
 
+async fn create_mailbox(host: &str, name: &str) {
+    let tcp = tokio::net::TcpStream::connect((host, 3143)).await.unwrap();
+    let mut client = async_imap::Client::new(tcp);
+    client.read_response().await.unwrap();
+    let mut session = match client.login("user", "pass").await {
+        Ok(session) => session,
+        Err((err, _)) => panic!("greenmail login failed: {err}"),
+    };
+    let _ = session
+        .run_command_and_check_ok(format!("CREATE \"{name}\""))
+        .await;
+    session.logout().await.unwrap();
+}
+
 #[tokio::test]
 async fn sync_uses_uid_rescan_fallback_without_condstore() {
     let Some(host) = greenmail_host() else {
@@ -213,6 +227,46 @@ async fn fetch_body_caches_raw_and_indexes_text() {
         hits.iter()
             .any(|hit| hit.message.uid == target.uid && hit.snippet.contains("Body"))
     );
+}
+
+#[tokio::test]
+async fn moves_and_deletes_messages_on_the_server() {
+    let Some(host) = greenmail_host() else {
+        eprintln!("skipping: set TEGAMI_GREENMAIL_HOST to run GreenMail tests");
+        return;
+    };
+    let source = unique("tegami-source");
+    let target = unique("tegami-target");
+    create_mailbox(&host, &source).await;
+    create_mailbox(&host, &target).await;
+    let mut backend = connect(&host).await;
+
+    let moved = unique("tegami-move");
+    let uid = backend
+        .append(&source, MessageFlags::default(), &raw_message(&moved))
+        .await
+        .unwrap();
+    backend
+        .move_messages(&source, &target, &[uid])
+        .await
+        .unwrap();
+    assert!(!backend.uids(&source).await.unwrap().contains(&uid));
+    let target_uids = backend.uids(&target).await.unwrap();
+    assert_eq!(target_uids.len(), 1);
+    let envelopes = backend
+        .fetch_envelopes(&target, &target_uids)
+        .await
+        .unwrap();
+    assert_eq!(envelopes[0].subject, moved);
+
+    let deleted = unique("tegami-delete");
+    let uid = backend
+        .append(&source, MessageFlags::default(), &raw_message(&deleted))
+        .await
+        .unwrap();
+    assert!(backend.uids(&source).await.unwrap().contains(&uid));
+    backend.delete_permanently(&source, &[uid]).await.unwrap();
+    assert!(!backend.uids(&source).await.unwrap().contains(&uid));
 }
 
 #[tokio::test]

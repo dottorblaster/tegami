@@ -392,10 +392,10 @@ impl MailBackend for ImapBackend {
             let session = self.session()?;
             session.select(&from).await.map_err(map_err)?;
             if supports_move {
-                session.uid_mv(to, &id_set).await.map_err(map_err)?;
+                session.uid_mv(&id_set, to).await.map_err(map_err)?;
                 return Ok(());
             }
-            session.uid_copy(to, &id_set).await.map_err(map_err)?;
+            session.uid_copy(&id_set, to).await.map_err(map_err)?;
             let mut messages = session
                 .uid_store(&id_set, "+FLAGS.SILENT (\\Deleted)")
                 .await
@@ -417,7 +417,7 @@ impl MailBackend for ImapBackend {
         let session = self.session()?;
         session.select(from).await.map_err(map_err)?;
         session
-            .uid_copy(to, uid_set(&uids))
+            .uid_copy(uid_set(&uids), to)
             .await
             .map_err(map_err)?;
         Ok(())
