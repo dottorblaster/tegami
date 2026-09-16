@@ -108,6 +108,7 @@ pub struct FolderSync {
     pub changed: usize,
     pub vanished: usize,
     pub new_uids: Vec<u32>,
+    pub unseen_changed: bool,
 }
 
 pub async fn sync_folder<B: MailBackend + ?Sized>(
@@ -128,6 +129,9 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
     if uidvalidity_changed {
         store.clear_messages(folder_id).await?;
     }
+    let unseen_changed = state
+        .unseen
+        .is_some_and(|unseen| folder.unread_count != i64::from(unseen));
     store.set_folder_state(folder_id, state).await?;
 
     let previous_modseq = if uidvalidity_changed {
@@ -189,6 +193,7 @@ pub async fn sync_folder<B: MailBackend + ?Sized>(
         changed: changed_count,
         vanished: vanished.len(),
         new_uids,
+        unseen_changed,
     })
 }
 

@@ -160,14 +160,20 @@ impl SidebarState {
 #[derive(Debug)]
 pub enum FolderTreeMsg {
     Reload,
-    Loaded(Result<Vec<SidebarRow>, String>),
-    RowActivated { index: i32 },
+    Loaded {
+        seq: u64,
+        result: Result<Vec<SidebarRow>, String>,
+    },
+    RowActivated {
+        index: i32,
+    },
 }
 
 pub struct FolderTree {
     rows: FactoryVecDeque<FolderRow>,
     store: Arc<Store>,
     state: SidebarState,
+    reload_seq: u64,
 }
 
 #[relm4::component(pub)]
@@ -249,6 +255,7 @@ impl SimpleComponent for FolderTree {
             rows,
             store,
             state: SidebarState::Loading,
+            reload_seq: 0,
         };
         let rows = model.rows.widget();
         let widgets = view_output!();
@@ -264,30 +271,34 @@ impl SimpleComponent for FolderTree {
                 if self.state != SidebarState::Ready {
                     self.state = SidebarState::Loading;
                 }
+                self.reload_seq = self.reload_seq.wrapping_add(1);
+                let seq = self.reload_seq;
                 let store = self.store.clone();
                 let reload_sender = sender.clone();
                 sender.oneshot_command(async move {
                     let result = load_rows(&store).await;
-                    reload_sender.input(FolderTreeMsg::Loaded(result));
+                    reload_sender.input(FolderTreeMsg::Loaded { seq, result });
                 });
             }
-            FolderTreeMsg::Loaded(result) => match result {
-                Ok(rows) if rows.is_empty() => {
-                    self.state = SidebarState::Empty;
+            FolderTreeMsg::Loaded { seq, result } => {
+                if seq != self.reload_seq {
+                    return;
                 }
-                Ok(rows) => {
-                    self.state = SidebarState::Ready;
-                    let mut guard = self.rows.guard();
-                    guard.clear();
-                    for row in rows {
-                        guard.push_back(row);
+                match result {
+                    Ok(rows) if rows.is_empty() => {
+                        self.rows.guard().clear();
+                        self.state = SidebarState::Empty;
+                    }
+                    Ok(rows) => {
+                        self.state = SidebarState::Ready;
+                        self.apply_rows(rows);
+                    }
+                    Err(detail) => {
+                        debug!(detail, "failed to load accounts");
+                        self.state = SidebarState::Error(detail);
                     }
                 }
-                Err(detail) => {
-                    debug!(detail, "failed to load accounts");
-                    self.state = SidebarState::Error(detail);
-                }
-            },
+            }
             FolderTreeMsg::RowActivated { index } => {
                 if let Some(output) = usize::try_from(index)
                     .ok()
@@ -306,6 +317,27 @@ impl FolderTree {
         match &self.state {
             SidebarState::Error(detail) => detail,
             _ => "Something went wrong while reading your accounts.",
+        }
+    }
+
+    fn apply_rows(&mut self, rows: Vec<SidebarRow>) {
+        let current: Vec<SidebarRow> = (0..self.rows.len())
+            .filter_map(|index| self.rows.get(index))
+            .map(|row| row.kind.clone())
+            .collect();
+        if row_keys(&current) != row_keys(&rows) {
+            let mut guard = self.rows.guard();
+            guard.clear();
+            for row in rows {
+                guard.push_back(row);
+            }
+            return;
+        }
+        let mut guard = self.rows.guard();
+        for (index, next) in rows.iter().enumerate() {
+            if guard[index].kind != *next {
+                guard.get_mut(index).expect("row index is in range").kind = next.clone();
+            }
         }
     }
 }
@@ -362,6 +394,26 @@ fn folder_order(a: &FolderRecord, b: &FolderRecord) -> std::cmp::Ordering {
     role_rank(a.special_use)
         .cmp(&role_rank(b.special_use))
         .then_with(|| a.name.cmp(&b.name))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarRowKey {
+    Account { email: String },
+    Folder { account_id: i64, folder_id: i64 },
+}
+
+fn row_keys(rows: &[SidebarRow]) -> Vec<SidebarRowKey> {
+    rows.iter()
+        .map(|row| match row {
+            SidebarRow::Account { email, .. } => SidebarRowKey::Account {
+                email: email.clone(),
+            },
+            SidebarRow::Folder { key, .. } => SidebarRowKey::Folder {
+                account_id: key.account_id,
+                folder_id: key.folder_id,
+            },
+        })
+        .collect()
 }
 
 fn role_rank(role: Option<SpecialUse>) -> u8 {
@@ -508,5 +560,35 @@ mod tests {
         assert_eq!(SidebarState::Empty.page_name(), "empty");
         assert_eq!(SidebarState::Ready.page_name(), "folders");
         assert_eq!(SidebarState::Error("boom".to_string()).page_name(), "error");
+    }
+
+    #[test]
+    fn row_keys_identify_rows_ignoring_volatile_fields() {
+        let row = SidebarRow::Folder {
+            key: FolderKey {
+                account_id: 1,
+                folder_id: 7,
+                name: "INBOX".to_string(),
+            },
+            title: "INBOX".to_string(),
+            unread: 3,
+        };
+        let renamed = SidebarRow::Folder {
+            key: FolderKey {
+                account_id: 1,
+                folder_id: 7,
+                name: "INBOX".to_string(),
+            },
+            title: "INBOX".to_string(),
+            unread: 0,
+        };
+        assert_eq!(row_keys(std::slice::from_ref(&row)), row_keys(&[renamed]));
+        assert_ne!(
+            row_keys(&[row]),
+            row_keys(&[SidebarRow::Account {
+                name: "Example".to_string(),
+                email: "a@b.c".to_string(),
+            }])
+        );
     }
 }

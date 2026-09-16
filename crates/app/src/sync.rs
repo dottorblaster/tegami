@@ -294,12 +294,18 @@ impl SyncService {
     ) {
         match event {
             WorkerEvent::FolderSynced(report) => {
+                let populated = !self.synced_folders.insert(report.folder_id);
+                if report.changed == 0
+                    && report.vanished == 0
+                    && report.new_uids.is_empty()
+                    && !report.uidvalidity_changed
+                    && !report.unseen_changed
+                {
+                    return;
+                }
                 let _ = sender.output(SyncServiceOutput::FolderChanged {
                     folder_id: report.folder_id,
                 });
-                // The first sync of a folder only populates it; new mail is
-                // worth notifying about afterwards.
-                let populated = !self.synced_folders.insert(report.folder_id);
                 if populated && !report.new_uids.is_empty() {
                     self.check_new_mail(report.folder_id, report.new_uids, sender);
                 }

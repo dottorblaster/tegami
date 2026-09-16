@@ -4,6 +4,7 @@
 //! Message list.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use mail_core::store::{MessageRecord, Store, bits_to_flags};
@@ -45,6 +46,16 @@ impl MessageRow {
             flagged: flags.flagged,
             has_attach: record.has_attach,
         }
+    }
+
+    fn same_ui(&self, other: &Self) -> bool {
+        self.uid == other.uid
+            && self.subject == other.subject
+            && self.sender == other.sender
+            && self.date == other.date
+            && self.unread == other.unread
+            && self.flagged == other.flagged
+            && self.has_attach == other.has_attach
     }
 }
 
@@ -207,6 +218,7 @@ pub enum MessageListMsg {
     },
     Loaded {
         folder_id: i64,
+        seq: u64,
         result: Result<Vec<MessageRow>, String>,
     },
     Select {
@@ -228,6 +240,7 @@ pub struct MessageList {
     selected_uid: Option<u32>,
     pending_select: Option<u32>,
     restoring: bool,
+    load_seq: u64,
     state: ListState,
 }
 
@@ -313,6 +326,7 @@ impl SimpleComponent for MessageList {
             selected_uid: None,
             pending_select: None,
             restoring: false,
+            load_seq: 0,
             state: ListState::Idle,
         };
         let list_view = &model.list.view;
@@ -324,38 +338,57 @@ impl SimpleComponent for MessageList {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         match msg {
             MessageListMsg::Load { folder_id } => {
-                if self.folder_id != Some(folder_id) {
+                let switched = self.folder_id != Some(folder_id);
+                if switched {
                     self.selected_uid = None;
+                    self.list.clear();
+                    self.state = ListState::Loading;
+                } else if matches!(self.state, ListState::Idle | ListState::Error(_)) {
+                    self.state = ListState::Loading;
                 }
                 self.folder_id = Some(folder_id);
-                self.state = ListState::Loading;
-                self.list.clear();
+                self.load_seq = self.load_seq.wrapping_add(1);
+                let seq = self.load_seq;
                 let store = self.store.clone();
                 let load_sender = sender.clone();
                 sender.oneshot_command(async move {
                     let result = load_rows(&store, folder_id).await;
-                    load_sender.input(MessageListMsg::Loaded { folder_id, result });
+                    load_sender.input(MessageListMsg::Loaded {
+                        folder_id,
+                        seq,
+                        result,
+                    });
                 });
             }
-            MessageListMsg::Loaded { folder_id, result } => {
-                if self.folder_id != Some(folder_id) {
+            MessageListMsg::Loaded {
+                folder_id,
+                seq,
+                result,
+            } => {
+                if self.folder_id != Some(folder_id) || seq != self.load_seq {
                     return;
                 }
                 self.restoring = true;
-                self.list.clear();
                 match result {
                     Ok(rows) if rows.is_empty() => {
                         self.selected_uid = None;
+                        self.list.clear();
                         self.state = ListState::Empty;
                     }
                     Ok(rows) => {
+                        if self.state == ListState::Ready {
+                            self.apply_update(rows);
+                        } else {
+                            self.list.clear();
+                            self.list.extend_from_iter(rows);
+                        }
                         self.state = ListState::Ready;
-                        self.list.extend_from_iter(rows);
                         self.restore_selection();
                     }
                     Err(detail) => {
                         debug!(folder_id, detail, "failed to load messages");
                         self.selected_uid = None;
+                        self.list.clear();
                         self.state = ListState::Error(detail);
                     }
                 }
@@ -436,6 +469,26 @@ impl MessageList {
         None
     }
 
+    fn apply_update(&mut self, rows: Vec<MessageRow>) {
+        let current = self.rows_snapshot();
+        let plan = plan_update(&current, &rows);
+        for uid in plan.removes {
+            if let Some(position) = self.list.find(|row| row.uid == uid) {
+                self.list.remove(position);
+            }
+        }
+        for row in plan.inserts {
+            self.list.append(row);
+        }
+    }
+
+    fn rows_snapshot(&self) -> Vec<MessageRow> {
+        (0..self.list.len())
+            .filter_map(|position| self.list.get(position))
+            .map(|item| item.borrow().clone())
+            .collect()
+    }
+
     fn empty_title(&self) -> &'static str {
         if self.folder_id.is_some() {
             "No messages"
@@ -472,6 +525,29 @@ async fn load_rows(store: &Store, folder_id: i64) -> Result<Vec<MessageRow>, Str
         .iter()
         .map(|message| MessageRow::from_record(message, &now))
         .collect())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UpdatePlan {
+    removes: Vec<u32>,
+    inserts: Vec<MessageRow>,
+}
+
+fn plan_update(current: &[MessageRow], next: &[MessageRow]) -> UpdatePlan {
+    let current_by_uid: HashMap<u32, &MessageRow> =
+        current.iter().map(|row| (row.uid, row)).collect();
+    let next_by_uid: HashMap<u32, &MessageRow> = next.iter().map(|row| (row.uid, row)).collect();
+    let removes = current
+        .iter()
+        .filter(|row| next_by_uid.get(&row.uid).is_none_or(|next| !row.same_ui(next)))
+        .map(|row| row.uid)
+        .collect();
+    let inserts = next
+        .iter()
+        .filter(|row| current_by_uid.get(&row.uid).is_none_or(|current| !current.same_ui(row)))
+        .cloned()
+        .collect();
+    UpdatePlan { removes, inserts }
 }
 
 #[cfg(test)]
@@ -566,5 +642,54 @@ mod tests {
         assert_eq!(ListState::Loading.page_name(), "loading");
         assert_eq!(ListState::Ready.page_name(), "messages");
         assert_eq!(ListState::Error("boom".to_string()).page_name(), "error");
+    }
+
+    #[test]
+    fn plan_update_is_a_noop_for_identical_rows() {
+        let now = utc(1_700_000_000);
+        let rows = vec![
+            MessageRow::from_record(&record(2, FLAG_SEEN, false), &now),
+            MessageRow::from_record(&record(1, 0, false), &now),
+        ];
+        let plan = plan_update(&rows, &rows);
+        assert!(plan.removes.is_empty());
+        assert!(plan.inserts.is_empty());
+    }
+
+    #[test]
+    fn plan_update_drops_vanished_and_adds_new_rows() {
+        let now = utc(1_700_000_000);
+        let current = vec![MessageRow::from_record(&record(3, 0, false), &now)];
+        let next = vec![MessageRow::from_record(&record(4, 0, false), &now)];
+        let plan = plan_update(&current, &next);
+        assert_eq!(plan.removes, vec![3]);
+        assert_eq!(plan.inserts.len(), 1);
+        assert_eq!(plan.inserts[0].uid, 4);
+    }
+
+    #[test]
+    fn plan_update_replaces_rows_whose_ui_changed() {
+        let now = utc(1_700_000_000);
+        let current = vec![MessageRow::from_record(&record(1, 0, false), &now)];
+        let mut seen = record(1, 0, false);
+        seen.flags = FLAG_SEEN;
+        let next = vec![MessageRow::from_record(&seen, &now)];
+        let plan = plan_update(&current, &next);
+        assert_eq!(plan.removes, vec![1]);
+        assert_eq!(plan.inserts.len(), 1);
+        assert!(!plan.inserts[0].unread);
+    }
+
+    #[test]
+    fn plan_update_catches_content_changes_beyond_ordering() {
+        let now = utc(1_700_000_000);
+        let current = vec![MessageRow::from_record(&record(1, 0, false), &now)];
+        let mut renamed = record(1, 0, false);
+        renamed.subject = "Different".to_string();
+        let next = vec![MessageRow::from_record(&renamed, &now)];
+        let plan = plan_update(&current, &next);
+        assert_eq!(plan.removes, vec![1]);
+        assert_eq!(plan.inserts.len(), 1);
+        assert_eq!(plan.inserts[0].subject, "Different");
     }
 }

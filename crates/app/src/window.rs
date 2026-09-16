@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gtk::gio;
 use mail_core::compose::ReplyMode;
@@ -50,6 +52,8 @@ pub struct Window {
     move_menu: Option<gio::Menu>,
     move_actions: Option<gio::SimpleActionGroup>,
     move_menu_dirty: Cell<bool>,
+    reload_pending: HashSet<i64>,
+    reload_scheduled: bool,
     send_receive_button: Option<gtk::Button>,
     sync_spinner: Option<gtk::Spinner>,
     composer: Option<Controller<Composer>>,
@@ -95,6 +99,7 @@ pub enum WindowMsg {
         account_id: i64,
         folders: Vec<FolderRecord>,
     },
+    FlushFolderReloads,
     MessagesChanged {
         folder_id: i64,
     },
@@ -426,6 +431,8 @@ impl SimpleComponent for Window {
             move_menu: None,
             move_actions: None,
             move_menu_dirty: Cell::new(false),
+            reload_pending: HashSet::new(),
+            reload_scheduled: false,
             send_receive_button: None,
             sync_spinner: None,
             composer: None,
@@ -548,10 +555,13 @@ impl SimpleComponent for Window {
                 }
             }
             WindowMsg::FolderChanged { folder_id } => {
-                self.reload_folder(folder_id);
+                self.queue_folder_reload(folder_id, &sender);
             }
             WindowMsg::MessagesChanged { folder_id } => {
-                self.reload_folder(folder_id);
+                self.queue_folder_reload(folder_id, &sender);
+            }
+            WindowMsg::FlushFolderReloads => {
+                self.flush_pending_reloads();
             }
             WindowMsg::Anchor(anchor) => {
                 let previous = self.anchor.as_ref().map(|anchor| anchor.account_id);
@@ -874,11 +884,30 @@ impl Window {
         }
     }
 
-    fn reload_folder(&self, folder_id: i64) {
-        self.folder_tree.emit(FolderTreeMsg::Reload);
-        if self.selected_folder_id == Some(folder_id) {
-            self.message_list.emit(MessageListMsg::Load { folder_id });
+    fn queue_folder_reload(&mut self, folder_id: i64, sender: &ComponentSender<Self>) {
+        self.reload_pending.insert(folder_id);
+        if self.reload_scheduled {
+            return;
         }
+        self.reload_scheduled = true;
+        let flush_sender = sender.clone();
+        glib::timeout_add_local_once(Duration::from_millis(80), move || {
+            flush_sender.input(WindowMsg::FlushFolderReloads);
+        });
+    }
+
+    fn flush_pending_reloads(&mut self) {
+        self.reload_scheduled = false;
+        if self.reload_pending.is_empty() {
+            return;
+        }
+        self.folder_tree.emit(FolderTreeMsg::Reload);
+        if let Some(selected) = self.selected_folder_id
+            && self.reload_pending.contains(&selected)
+        {
+            self.message_list.emit(MessageListMsg::Load { folder_id: selected });
+        }
+        self.reload_pending.clear();
     }
 
     fn apply_flag_change(
