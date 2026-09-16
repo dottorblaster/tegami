@@ -1,10 +1,12 @@
 // Copyright (C) 2026 Tegami contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use tokio::sync::mpsc;
+use std::sync::Arc;
+
+use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinHandle;
 
-use crate::MailBackend;
+use crate::{IdleOutcome, MailBackend};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdleEvent {
@@ -33,8 +35,9 @@ impl IdleWorker {
                 return;
             }
             loop {
-                match backend.idle(&folder).await {
-                    Ok(()) => {
+                let interrupt = Arc::new(Notify::new());
+                match backend.idle(&folder, interrupt).await {
+                    Ok(IdleOutcome::Changed) => {
                         let event = IdleEvent::Changed {
                             folder: folder.clone(),
                         };
@@ -42,6 +45,7 @@ impl IdleWorker {
                             break;
                         }
                     }
+                    Ok(IdleOutcome::Interrupted) => {}
                     Err(err) => {
                         let event = IdleEvent::Failed {
                             folder: folder.clone(),

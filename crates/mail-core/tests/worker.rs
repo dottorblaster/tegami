@@ -218,6 +218,55 @@ async fn worker_deletes_messages_from_the_server() {
 }
 
 #[tokio::test]
+async fn worker_handles_commands_while_idling() {
+    let mut backend = FakeBackend::with_folders(&[("INBOX", 2)]);
+    backend.idle_supported = true;
+    backend.idle_delay = Duration::from_secs(30);
+    let store = Store::open(":memory:").unwrap();
+    let account_id = store.upsert_account(account()).await.unwrap();
+    let temp = TempDir::new().unwrap();
+    let (mut worker, mut events) = AccountWorker::spawn(
+        backend,
+        store.clone(),
+        worker_config(account_id, temp.path()),
+    );
+    let mut drain = 0;
+    while drain < 4 {
+        recv(&mut events).await;
+        drain += 1;
+    }
+    worker.send(WorkerCommand::Watch {
+        folder: "INBOX".to_string(),
+    });
+    assert!(matches!(
+        recv(&mut events).await,
+        WorkerEvent::FolderSynced(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    worker.send(WorkerCommand::SetFlags {
+        folder: "INBOX".to_string(),
+        uids: vec![1],
+        change: FlagChange {
+            seen: Some(true),
+            ..FlagChange::default()
+        },
+    });
+    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("the worker did not handle the command while idling")
+        .unwrap();
+    assert_eq!(
+        event,
+        WorkerEvent::FlagsChanged {
+            folder: "INBOX".to_string(),
+            uids: vec![1],
+        }
+    );
+    worker.shutdown();
+}
+
+#[tokio::test]
 async fn worker_fetches_body_into_cache() {
     let mut backend = FakeBackend::with_folders(&[("INBOX", 1)]);
     backend.set_body("INBOX", 1, b"Subject: hello\r\n\r\ngreeting\r\n");

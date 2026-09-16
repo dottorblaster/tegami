@@ -1,9 +1,9 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
-use crate::MailBackend;
 use crate::account::AccountConfig;
 use crate::backend::Credential;
 use crate::envelope::FlagChange;
@@ -13,6 +13,7 @@ use crate::sync::{
     fetch_body as fetch_message_body, queue_delete, queue_move, queue_set_flags, replay_pending,
     save_draft as save_draft_message, save_sent as save_sent_messages, sync_account, sync_folder,
 };
+use crate::{IdleOutcome, MailBackend};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerConfig {
@@ -721,8 +722,33 @@ async fn run<B: MailBackend>(
 
         match worker.watch.clone() {
             Some(folder) if worker.backend.supports_idle() => {
-                match worker.backend.idle(&folder).await {
-                    Ok(()) => {
+                let interrupt = Arc::new(Notify::new());
+                let (outcome, shutdown) = {
+                    let idling = worker.backend.idle(&folder, interrupt.clone());
+                    tokio::pin!(idling);
+                    let mut shutdown = false;
+                    let outcome = loop {
+                        tokio::select! {
+                            outcome = &mut idling => break outcome,
+                            command = commands.recv() => match command {
+                                Some(command) => {
+                                    worker.queue.push_back(command);
+                                    interrupt.notify_one();
+                                }
+                                None => {
+                                    shutdown = true;
+                                    break Ok(IdleOutcome::Interrupted);
+                                }
+                            },
+                        }
+                    };
+                    (outcome, shutdown)
+                };
+                if shutdown {
+                    break 'worker;
+                }
+                match outcome {
+                    Ok(IdleOutcome::Changed) => {
                         let _ = worker.emit(WorkerEvent::Idle(IdleEvent::Changed {
                             folder: folder.clone(),
                         }));
@@ -731,6 +757,7 @@ async fn run<B: MailBackend>(
                             worker.queue.push_back(WorkerCommand::SyncFolder { folder });
                         }
                     }
+                    Ok(IdleOutcome::Interrupted) => {}
                     Err(err) => {
                         let _ = worker.emit(WorkerEvent::Idle(IdleEvent::Failed {
                             folder: folder.clone(),

@@ -99,7 +99,10 @@ async fn mail_backend_round_trip() {
         .unwrap();
     assert!(appended > 0);
 
-    backend.idle("INBOX").await.unwrap();
+    backend
+        .idle("INBOX", std::sync::Arc::new(tokio::sync::Notify::new()))
+        .await
+        .unwrap();
     assert_eq!(backend.idle_calls, 1);
     backend.disconnect().await.unwrap();
 }

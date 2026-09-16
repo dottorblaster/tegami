@@ -14,11 +14,14 @@ use futures_util::StreamExt;
 use imap_proto::{Response, ResponseCode, UidSetMember};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 
 use crate::account::AccountConfig;
 use crate::backend::Result;
 use crate::envelope::{Address, Envelope, FlagChange, MessageFlags};
-use crate::{Credential, Folder, FolderDelta, FolderRole, FolderState, MailBackend, MailError};
+use crate::{
+    Credential, Folder, FolderDelta, FolderRole, FolderState, IdleOutcome, MailBackend, MailError,
+};
 
 use super::auth::Xoauth2;
 
@@ -435,7 +438,7 @@ impl MailBackend for ImapBackend {
         self.expunge(folder, uids).await
     }
 
-    async fn idle(&mut self, folder: &str) -> Result<()> {
+    async fn idle(&mut self, folder: &str, interrupt: Arc<Notify>) -> Result<IdleOutcome> {
         if !self.supports_idle {
             return Err(MailError::Protocol("IDLE not supported".to_string()));
         }
@@ -444,14 +447,15 @@ impl MailBackend for ImapBackend {
         let mut idle = session.idle();
         idle.init().await.map_err(map_err)?;
         let (wait, stop_source) = idle.wait_with_timeout(IDLE_CYCLE);
-        let response = wait.await.map_err(map_err)?;
+        let response = tokio::select! {
+            response = wait => response.map_err(map_err)?,
+            () = interrupt.notified() => IdleResponse::ManualInterrupt,
+        };
         drop(stop_source);
         self.session = Some(idle.done().await.map_err(map_err)?);
         match response {
-            IdleResponse::NewData(_) | IdleResponse::Timeout => Ok(()),
-            IdleResponse::ManualInterrupt => {
-                Err(MailError::Protocol("idle interrupted".to_string()))
-            }
+            IdleResponse::NewData(_) | IdleResponse::Timeout => Ok(IdleOutcome::Changed),
+            IdleResponse::ManualInterrupt => Ok(IdleOutcome::Interrupted),
         }
     }
 }

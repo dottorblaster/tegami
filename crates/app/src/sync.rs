@@ -68,6 +68,7 @@ pub enum ResolvedAction {
 #[derive(Debug)]
 pub enum SyncServiceMsg {
     Start,
+    SendReceive,
     AccountsLoaded(Vec<ServiceAccount>),
     WorkerEvent {
         account_id: i64,
@@ -120,6 +121,11 @@ pub enum SyncServiceMsg {
 #[derive(Debug)]
 pub enum SyncServiceOutput {
     AccountsChanged,
+    SyncStarted,
+    SyncFinished {
+        synced: usize,
+        failed: usize,
+    },
     FolderChanged {
         folder_id: i64,
     },
@@ -150,6 +156,40 @@ pub struct SyncService {
     send_workers: HashMap<i64, SendWorker>,
     watching: bool,
     synced_folders: HashSet<i64>,
+    sync: SyncTracker,
+}
+
+#[derive(Debug, Default)]
+struct SyncTracker {
+    pending: HashSet<i64>,
+    synced: usize,
+    failed: usize,
+}
+
+impl SyncTracker {
+    fn start(&mut self, accounts: impl IntoIterator<Item = i64>) -> bool {
+        if !self.pending.is_empty() {
+            return false;
+        }
+        self.pending = accounts.into_iter().collect();
+        self.synced = 0;
+        self.failed = 0;
+        !self.pending.is_empty()
+    }
+
+    fn complete(&mut self, account_id: i64, failed: bool) -> Option<(usize, usize)> {
+        if !self.pending.remove(&account_id) {
+            return None;
+        }
+        if failed {
+            self.failed += 1;
+        } else {
+            self.synced += 1;
+        }
+        self.pending
+            .is_empty()
+            .then_some((self.synced, self.failed))
+    }
 }
 
 impl SyncService {
@@ -265,10 +305,12 @@ impl SyncService {
                 }
             }
             WorkerEvent::AccountSynced { .. } => {
+                self.finish_sync(account_id, false, sender);
                 let _ = sender.output(SyncServiceOutput::AccountsChanged);
             }
             WorkerEvent::Failed { operation, detail } => {
                 warn!(account_id, operation, detail, "sync worker failure");
+                self.finish_sync(account_id, true, sender);
                 let _ = sender.output(SyncServiceOutput::Error {
                     detail: format!("{operation}: {detail}"),
                 });
@@ -294,6 +336,17 @@ impl SyncService {
             WorkerEvent::DraftSaved { folder, uid, .. } => {
                 let _ = sender.output(SyncServiceOutput::DraftSaved { folder, uid });
             }
+        }
+    }
+
+    fn finish_sync(
+        &mut self,
+        account_id: i64,
+        failed: bool,
+        sender: &ComponentSender<SyncService>,
+    ) {
+        if let Some((synced, failed)) = self.sync.complete(account_id, failed) {
+            let _ = sender.output(SyncServiceOutput::SyncFinished { synced, failed });
         }
     }
 
@@ -430,6 +483,7 @@ impl SimpleComponent for SyncService {
             send_workers: HashMap::new(),
             watching: false,
             synced_folders: HashSet::new(),
+            sync: SyncTracker::default(),
         };
         sender.input(SyncServiceMsg::Start);
         ComponentParts { model, widgets: () }
@@ -448,6 +502,20 @@ impl SimpleComponent for SyncService {
                         Err(err) => start_sender.input(SyncServiceMsg::Failed { detail: err }),
                     }
                 });
+            }
+            SyncServiceMsg::SendReceive => {
+                let accounts: Vec<i64> = self.workers.keys().copied().collect();
+                if !self.sync.start(accounts) {
+                    debug!("send/receive already running or no accounts");
+                    return;
+                }
+                for worker in self.workers.values() {
+                    worker.send(WorkerCommand::Sync);
+                }
+                for worker in self.send_workers.values() {
+                    worker.send(SendCommand::Drain);
+                }
+                let _ = sender.output(SyncServiceOutput::SyncStarted);
             }
             SyncServiceMsg::AccountsLoaded(accounts) => {
                 self.reconcile(accounts, &sender);
@@ -944,5 +1012,19 @@ mod tests {
         assert!(new_mail_notices(&store, archive, &[4]).await.is_none());
         assert!(new_mail_notices(&store, 404, &[4]).await.is_none());
         assert!(new_mail_notices(&store, inbox, &[]).await.is_none());
+    }
+
+    #[test]
+    fn sync_tracker_reports_completion_once() {
+        let mut tracker = SyncTracker::default();
+        assert!(!tracker.start(Vec::new()));
+        assert!(tracker.start([1, 2]));
+        assert!(!tracker.start([3]));
+        assert_eq!(tracker.complete(1, false), None);
+        assert_eq!(tracker.complete(99, false), None);
+        assert_eq!(tracker.complete(2, true), Some((1, 1)));
+        assert_eq!(tracker.complete(2, true), None);
+        assert!(tracker.start([4]));
+        assert_eq!(tracker.complete(4, false), Some((1, 0)));
     }
 }

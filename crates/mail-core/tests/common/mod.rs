@@ -3,13 +3,15 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use mail_core::account::AccountConfig;
 use mail_core::backend::Result;
 use mail_core::envelope::{Address, Envelope, FlagChange, MessageFlags};
 use mail_core::folder::{Folder, FolderDelta, FolderRole, FolderState};
-use mail_core::{Credential, MailBackend, MailError};
+use mail_core::{Credential, IdleOutcome, MailBackend, MailError};
+use tokio::sync::Notify;
 
 pub struct FakeBackend {
     pub folders: Vec<(String, Vec<Envelope>)>,
@@ -377,15 +379,18 @@ impl MailBackend for FakeBackend {
         Ok(())
     }
 
-    async fn idle(&mut self, _folder: &str) -> Result<()> {
+    async fn idle(&mut self, _folder: &str, interrupt: Arc<Notify>) -> Result<IdleOutcome> {
         if !self.idle_supported {
             return Err(MailError::Protocol("IDLE not supported".to_string()));
         }
         self.idle_calls += 1;
-        if !self.idle_delay.is_zero() {
-            tokio::time::sleep(self.idle_delay).await;
+        if self.idle_delay.is_zero() {
+            return Ok(IdleOutcome::Changed);
         }
-        Ok(())
+        tokio::select! {
+            () = tokio::time::sleep(self.idle_delay) => Ok(IdleOutcome::Changed),
+            () = interrupt.notified() => Ok(IdleOutcome::Interrupted),
+        }
     }
 }
 

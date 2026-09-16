@@ -52,6 +52,7 @@ fn register_actions() {
     register_open_message_action(&app);
     register_compose_action(&app);
     register_search_action(&app);
+    register_send_receive_action(&app);
 }
 
 fn register_compose_action(app: &gtk::Application) {
@@ -70,6 +71,15 @@ fn register_search_action(app: &gtk::Application) {
     });
     app.add_action(&action);
     app.set_accels_for_action("app.search", &["<primary>f"]);
+}
+
+fn register_send_receive_action(app: &gtk::Application) {
+    let action = gio::SimpleAction::new("send-receive", None);
+    action.connect_activate(|_, _| {
+        WINDOW_BROKER.send(WindowMsg::SendReceive);
+    });
+    app.add_action(&action);
+    app.set_accels_for_action("app.send-receive", &["F9"]);
 }
 
 fn register_open_message_action(app: &gtk::Application) {

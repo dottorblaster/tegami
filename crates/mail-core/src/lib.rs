@@ -24,7 +24,7 @@ pub mod sync;
 pub mod threading;
 pub mod worker;
 
-pub use backend::{Credential, MailBackend, MailError};
+pub use backend::{Credential, IdleOutcome, MailBackend, MailError};
 pub use envelope::{Address, Envelope, FlagChange, MessageFlags};
 pub use folder::{Folder, FolderDelta, FolderRole, FolderState};
 pub use send_worker::{SendCommand, SendEvent, SendWorker, SendWorkerConfig};

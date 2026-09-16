@@ -10,10 +10,22 @@
 //! fetched lazily as raw MIME bytes; parsing happens above the backend.
 
 use std::future::Future;
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 use crate::account::AccountConfig;
 use crate::envelope::{Envelope, FlagChange, MessageFlags};
 use crate::folder::{Folder, FolderDelta, FolderState};
+
+/// Why [`MailBackend::idle`] returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleOutcome {
+    /// The server signalled a change or the idle cycle timed out.
+    Changed,
+    /// The caller asked to stop idling so it could run a command.
+    Interrupted,
+}
 
 /// Untyped error surfaced by a [`MailBackend`].
 #[derive(Debug)]
@@ -148,7 +160,13 @@ pub trait MailBackend {
         uids: &[u32],
     ) -> impl Future<Output = Result<()>> + Send;
 
-    /// Waits for a change in the given folder, returning when the server
-    /// signals one; the caller re-fetches to observe it.
-    fn idle(&mut self, folder: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Waits for a change in the given folder until the server signals one,
+    /// the idle cycle elapses, or `interrupt` is notified. Interrupting keeps
+    /// the session usable so the caller can run the next command without
+    /// reconnecting.
+    fn idle(
+        &mut self,
+        folder: &str,
+        interrupt: Arc<Notify>,
+    ) -> impl Future<Output = Result<IdleOutcome>> + Send;
 }

@@ -50,6 +50,8 @@ pub struct Window {
     move_menu: Option<gio::Menu>,
     move_actions: Option<gio::SimpleActionGroup>,
     move_menu_dirty: Cell<bool>,
+    send_receive_button: Option<gtk::Button>,
+    sync_spinner: Option<gtk::Spinner>,
     composer: Option<Controller<Composer>>,
     pending_draft: Option<composer::DraftRef>,
 }
@@ -72,6 +74,12 @@ pub enum WindowMsg {
         message_id: i64,
     },
     AccountsChanged,
+    SendReceive,
+    SyncStarted,
+    SyncFinished {
+        synced: usize,
+        failed: usize,
+    },
     FolderChanged {
         folder_id: i64,
     },
@@ -191,6 +199,19 @@ impl SimpleComponent for Window {
                                     set_icon_name: "sidebar-show-symbolic",
                                     set_tooltip_text: Some("Show folders"),
                                     set_active: true,
+                                },
+
+                                #[name(send_receive_button)]
+                                pack_start = &gtk::Button {
+                                    set_icon_name: "mail-send-receive-symbolic",
+                                    set_tooltip_text: Some("Send and receive mail (F9)"),
+                                    connect_clicked[sender] => move |_| sender.input(WindowMsg::SendReceive),
+                                },
+
+                                #[name(sync_spinner)]
+                                pack_start = &gtk::Spinner {
+                                    set_visible: false,
+                                    set_valign: gtk::Align::Center,
                                 },
 
                                 pack_end = &gtk::Button {
@@ -362,6 +383,10 @@ impl SimpleComponent for Window {
                 .launch(store.clone())
                 .forward(sender.input_sender(), |msg| match msg {
                     SyncServiceOutput::AccountsChanged => WindowMsg::AccountsChanged,
+                    SyncServiceOutput::SyncStarted => WindowMsg::SyncStarted,
+                    SyncServiceOutput::SyncFinished { synced, failed } => {
+                        WindowMsg::SyncFinished { synced, failed }
+                    }
                     SyncServiceOutput::FolderChanged { folder_id } => {
                         WindowMsg::FolderChanged { folder_id }
                     }
@@ -401,6 +426,8 @@ impl SimpleComponent for Window {
             move_menu: None,
             move_actions: None,
             move_menu_dirty: Cell::new(false),
+            send_receive_button: None,
+            sync_spinner: None,
             composer: None,
             pending_draft: None,
         };
@@ -412,6 +439,8 @@ impl SimpleComponent for Window {
         let widgets = view_output!();
         model.split_view = Some(widgets.inner_view.clone());
         model.toast_overlay = Some(widgets.toast_overlay.clone());
+        model.send_receive_button = Some(widgets.send_receive_button.clone());
+        model.sync_spinner = Some(widgets.sync_spinner.clone());
 
         let search_entry = gtk::SearchEntry::new();
         let search_bar = gtk::SearchBar::builder().child(&search_entry).build();
@@ -445,6 +474,10 @@ impl SimpleComponent for Window {
         menu.append_item(&gio::MenuItem::new(
             Some("New Message"),
             Some("app.compose"),
+        ));
+        menu.append_item(&gio::MenuItem::new(
+            Some("Send/Receive"),
+            Some("app.send-receive"),
         ));
         menu.append_item(&RelmAction::<About>::to_menu_item("About Tegami"));
         menu.append_item(&RelmAction::<Quit>::to_menu_item("Quit"));
@@ -499,6 +532,20 @@ impl SimpleComponent for Window {
             }
             WindowMsg::AccountsChanged => {
                 self.folder_tree.emit(FolderTreeMsg::Reload);
+            }
+            WindowMsg::SendReceive => {
+                self.sync_service.emit(SyncServiceMsg::SendReceive);
+            }
+            WindowMsg::SyncStarted => {
+                self.set_syncing(true);
+            }
+            WindowMsg::SyncFinished { synced, failed } => {
+                self.set_syncing(false);
+                if failed > 0 {
+                    self.show_toast("Some accounts could not be reached");
+                } else if synced > 0 {
+                    self.show_toast("Mailbox is up to date");
+                }
             }
             WindowMsg::FolderChanged { folder_id } => {
                 self.reload_folder(folder_id);
@@ -803,13 +850,27 @@ impl Window {
     }
 
     fn toast(&self, sent: bool) {
+        let label = if sent {
+            "Message sent"
+        } else {
+            "Message queued for delivery"
+        };
+        self.show_toast(label);
+    }
+
+    fn show_toast(&self, label: &str) {
         if let Some(overlay) = &self.toast_overlay {
-            let label = if sent {
-                "Message sent"
-            } else {
-                "Message queued for delivery"
-            };
             overlay.add_toast(adw::Toast::new(label));
+        }
+    }
+
+    fn set_syncing(&self, syncing: bool) {
+        if let Some(button) = &self.send_receive_button {
+            button.set_sensitive(!syncing);
+        }
+        if let Some(spinner) = &self.sync_spinner {
+            spinner.set_spinning(syncing);
+            spinner.set_visible(syncing);
         }
     }
 
